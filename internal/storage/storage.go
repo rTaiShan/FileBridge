@@ -21,10 +21,11 @@ func ResponseDir(root, clientID string) string {
 func RegistryPath(root string) string  { return filepath.Join(root, "registry", "services.json") }
 func HeartbeatPath(root string) string { return filepath.Join(root, "server", "heartbeat.json") }
 
-func RequestMeta(id string) string  { return id + ".request.json" }
-func RequestBody(id string) string  { return id + ".request.body" }
-func ResponseMeta(id string) string { return id + ".response.json" }
-func ResponseBody(id string) string { return id + ".response.body" }
+func RequestMeta(id string) string   { return id + ".request.json" }
+func RequestBody(id string) string   { return id + ".request.body" }
+func RequestCancel(id string) string { return id + ".request.cancelled" }
+func ResponseMeta(id string) string  { return id + ".response.json" }
+func ResponseBody(id string) string  { return id + ".response.body" }
 
 // WriteJSONAtomic makes the final name visible only after complete JSON has
 // been written. Metadata is deliberately the publish marker for each message.

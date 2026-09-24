@@ -26,10 +26,12 @@ type Server struct {
 
 	mu       sync.Mutex
 	inFlight map[string]struct{}
+	logMu    sync.Mutex
+	lastLog  map[string]time.Time
 }
 
 func NewServer(root string, cfg config.Server) *Server {
-	return &Server{Root: root, Config: cfg, PollInterval: 500 * time.Millisecond, HTTPClient: &http.Client{Timeout: 30 * time.Second}, inFlight: map[string]struct{}{}}
+	return &Server{Root: root, Config: cfg, PollInterval: 500 * time.Millisecond, HTTPClient: &http.Client{Timeout: 30 * time.Second}, inFlight: map[string]struct{}{}, lastLog: map[string]time.Time{}}
 }
 
 func (s *Server) Run(ctx context.Context) error {
@@ -42,16 +44,16 @@ func (s *Server) Run(ctx context.Context) error {
 	for {
 		if !registryPublished {
 			if err := s.PublishRegistry(); err != nil {
-				log.Printf("FileBridge: publish registry: %v", err)
+				s.logIssue("registry", "publish registry", err)
 			} else {
 				registryPublished = true
 			}
 		}
 		if err := s.publishHeartbeat(); err != nil {
-			log.Printf("FileBridge: publish heartbeat: %v", err)
+			s.logIssue("heartbeat", "publish heartbeat", err)
 		}
 		if err := s.ScanOnce(ctx); err != nil {
-			log.Printf("FileBridge: scan inbox: %v", err)
+			s.logIssue("scan", "scan inbox", err)
 		}
 		select {
 		case <-ctx.Done():
@@ -129,13 +131,31 @@ func (s *Server) claim(key string) bool {
 }
 func (s *Server) release(key string) { s.mu.Lock(); delete(s.inFlight, key); s.mu.Unlock() }
 
+func (s *Server) logIssue(key, operation string, err error) {
+	s.logMu.Lock()
+	defer s.logMu.Unlock()
+	if s.lastLog == nil {
+		s.lastLog = map[string]time.Time{}
+	}
+	if last := s.lastLog[key]; !last.IsZero() && time.Since(last) < 5*time.Second {
+		return
+	}
+	s.lastLog[key] = time.Now()
+	log.Printf("FileBridge: %s: %v", operation, err)
+}
+
 func (s *Server) handle(parent context.Context, clientID, id, requestDir string) {
 	responseDir := storage.ResponseDir(s.Root, clientID)
+	defer s.cleanupRequest(requestDir, id)
 	if _, err := os.Stat(filepath.Join(responseDir, storage.ResponseMeta(id))); err == nil {
+		return
+	}
+	if s.requestCancelled(requestDir, id) {
 		return
 	}
 	var req protocol.Request
 	if err := storage.ReadJSON(filepath.Join(requestDir, storage.RequestMeta(id)), &req); err != nil {
+		s.writeBridgeError(responseDir, id, "invalid_request", "invalid request metadata", http.StatusBadRequest)
 		return
 	}
 	if req.ID != id || req.ClientID != clientID || !storage.SafeName(req.ClientID) || req.Method == "" || !strings.HasPrefix(req.Path, "/") || req.Body.File != storage.RequestBody(id) {
@@ -144,9 +164,20 @@ func (s *Server) handle(parent context.Context, clientID, id, requestDir string)
 	}
 	bodyPath := filepath.Join(requestDir, req.Body.File)
 	info, err := os.Stat(bodyPath)
-	if err != nil || info.Size() != req.Body.Size {
+	if os.IsNotExist(err) {
+		s.writeBridgeError(responseDir, id, "invalid_request", "request body is missing", http.StatusBadRequest)
 		return
-	} // body may still be publishing; metadata remains for a later poll
+	}
+	if err != nil {
+		return
+	}
+	if info.Size() != req.Body.Size {
+		s.writeBridgeError(responseDir, id, "invalid_request", "request body size does not match metadata", http.StatusBadRequest)
+		return
+	}
+	if s.requestCancelled(requestDir, id) {
+		return
+	}
 	service, ok := s.Config.Services[req.Service]
 	if !ok {
 		s.writeBridgeError(responseDir, id, "service_not_found", "service is not registered", http.StatusNotFound)
@@ -172,6 +203,17 @@ func (s *Server) handle(parent context.Context, clientID, id, requestDir string)
 			code, status = "deadline_exceeded", http.StatusGatewayTimeout
 		}
 		s.writeBridgeError(responseDir, id, code, err.Error(), status)
+	}
+}
+
+func (s *Server) requestCancelled(requestDir, id string) bool {
+	_, err := os.Stat(filepath.Join(requestDir, storage.RequestCancel(id)))
+	return err == nil
+}
+
+func (s *Server) cleanupRequest(requestDir, id string) {
+	for _, name := range []string{storage.RequestMeta(id), storage.RequestBody(id), storage.RequestCancel(id)} {
+		_ = os.Remove(filepath.Join(requestDir, name))
 	}
 }
 

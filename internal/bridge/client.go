@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -42,6 +43,7 @@ func (c *Client) RunRefresher(ctx context.Context) {
 		c.PollInterval = 500 * time.Millisecond
 	}
 	c.RefreshRegistry()
+	c.cleanupStale()
 	t := time.NewTicker(c.PollInterval)
 	defer t.Stop()
 	for {
@@ -50,6 +52,7 @@ func (c *Client) RunRefresher(ctx context.Context) {
 			return
 		case <-t.C:
 			c.RefreshRegistry()
+			c.cleanupStale()
 		}
 	}
 }
@@ -152,7 +155,9 @@ func (c *Client) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	resp, body, err := c.waitForResponse(r.Context(), id, deadline)
 	if err != nil {
-		c.cleanup(id)
+		if err := c.markCancelled(id); err != nil {
+			log.Printf("FileBridge: mark request %s cancelled: %v", id, err)
+		}
 		if errors.Is(err, context.DeadlineExceeded) {
 			http.Error(w, "bridge request timed out", http.StatusGatewayTimeout)
 		} else {
@@ -222,9 +227,84 @@ func (c *Client) copyResponse(w http.ResponseWriter, response protocol.Response,
 func (c *Client) cleanup(id string) {
 	for _, path := range []string{
 		filepath.Join(storage.RequestDir(c.Root, c.ID), storage.RequestMeta(id)), filepath.Join(storage.RequestDir(c.Root, c.ID), storage.RequestBody(id)),
-		filepath.Join(storage.ResponseDir(c.Root, c.ID), storage.ResponseMeta(id)), filepath.Join(storage.ResponseDir(c.Root, c.ID), storage.ResponseBody(id)),
+		filepath.Join(storage.RequestDir(c.Root, c.ID), storage.RequestCancel(id)), filepath.Join(storage.ResponseDir(c.Root, c.ID), storage.ResponseMeta(id)), filepath.Join(storage.ResponseDir(c.Root, c.ID), storage.ResponseBody(id)),
 	} {
 		_ = os.Remove(path)
+	}
+}
+
+func (c *Client) markCancelled(id string) error {
+	dir := storage.RequestDir(c.Root, c.ID)
+	_, err := storage.WriteBodyAtomic(dir, storage.RequestCancel(id), strings.NewReader("cancelled\n"))
+	return err
+}
+
+func (c *Client) cleanupStale() {
+	maxAge := 2 * c.Timeout
+	if maxAge <= 0 {
+		maxAge = time.Minute
+	}
+	cutoff := time.Now().Add(-maxAge)
+	for _, item := range []struct {
+		dir      string
+		metadata string
+		body     string
+		cancel   string
+	}{
+		{storage.RequestDir(c.Root, c.ID), ".request.json", ".request.body", ".request.cancelled"},
+		{storage.ResponseDir(c.Root, c.ID), ".response.json", ".response.body", ""},
+	} {
+		entries, err := os.ReadDir(item.dir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), item.metadata) {
+				continue
+			}
+			info, err := entry.Info()
+			if err != nil || info.ModTime().After(cutoff) {
+				continue
+			}
+			id := strings.TrimSuffix(entry.Name(), item.metadata)
+			if !storage.SafeName(id) {
+				continue
+			}
+			_ = os.Remove(filepath.Join(item.dir, entry.Name()))
+			if item.body != "" {
+				_ = os.Remove(filepath.Join(item.dir, id+item.body))
+			}
+			if item.cancel != "" {
+				_ = os.Remove(filepath.Join(item.dir, id+item.cancel))
+			}
+		}
+	}
+	c.cleanupOrphanFiles(storage.RequestDir(c.Root, c.ID), ".request.body", storage.RequestMeta)
+	c.cleanupOrphanFiles(storage.RequestDir(c.Root, c.ID), ".request.cancelled", storage.RequestMeta)
+	c.cleanupOrphanFiles(storage.ResponseDir(c.Root, c.ID), ".response.body", storage.ResponseMeta)
+}
+
+func (c *Client) cleanupOrphanFiles(dir, suffix string, metadata func(string) string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-2 * c.Timeout)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), suffix) {
+			continue
+		}
+		id := strings.TrimSuffix(entry.Name(), suffix)
+		if !storage.SafeName(id) {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(dir, metadata(id))); err == nil {
+			continue
+		}
+		info, err := entry.Info()
+		if err == nil && !info.ModTime().After(cutoff) {
+			_ = os.Remove(filepath.Join(dir, entry.Name()))
+		}
 	}
 }
 
