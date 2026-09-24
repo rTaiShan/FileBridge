@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -35,28 +36,27 @@ func (s *Server) Run(ctx context.Context) error {
 	if s.PollInterval <= 0 {
 		s.PollInterval = 500 * time.Millisecond
 	}
-	if err := s.PublishRegistry(); err != nil {
-		return err
-	}
-	if err := s.publishHeartbeat(); err != nil {
-		return err
-	}
-	if err := s.ScanOnce(ctx); err != nil {
-		return err
-	}
+	registryPublished := false
 	ticker := time.NewTicker(s.PollInterval)
 	defer ticker.Stop()
 	for {
+		if !registryPublished {
+			if err := s.PublishRegistry(); err != nil {
+				log.Printf("FileBridge: publish registry: %v", err)
+			} else {
+				registryPublished = true
+			}
+		}
+		if err := s.publishHeartbeat(); err != nil {
+			log.Printf("FileBridge: publish heartbeat: %v", err)
+		}
+		if err := s.ScanOnce(ctx); err != nil {
+			log.Printf("FileBridge: scan inbox: %v", err)
+		}
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			if err := s.publishHeartbeat(); err != nil {
-				return err
-			}
-			if err := s.ScanOnce(ctx); err != nil {
-				return err
-			}
 		}
 	}
 }
@@ -106,6 +106,11 @@ func (s *Server) ScanOnce(ctx context.Context) error {
 			}
 			go func(clientID, requestID, requestDir, claimKey string) {
 				defer s.release(claimKey)
+				defer func() {
+					if recovered := recover(); recovered != nil {
+						log.Printf("FileBridge: request %s/%s panicked: %v", clientID, requestID, recovered)
+					}
+				}()
 				s.handle(ctx, clientID, requestID, requestDir)
 			}(client.Name(), id, dir, key)
 		}

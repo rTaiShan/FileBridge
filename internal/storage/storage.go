@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 func RequestDir(root, clientID string) string {
@@ -57,11 +58,16 @@ func WriteBodyAtomic(dir, name string, r io.Reader) (int64, error) {
 		_ = os.Remove(tmpName)
 		return n, copyErr
 	}
-	if err := os.Rename(tmpName, filepath.Join(dir, name)); err != nil {
-		_ = os.Remove(tmpName)
-		return n, err
+	destination := filepath.Join(dir, name)
+	var renameErr error
+	for range 10 {
+		if renameErr = os.Rename(tmpName, destination); renameErr == nil {
+			return n, nil
+		}
+		time.Sleep(25 * time.Millisecond)
 	}
-	return n, nil
+	_ = os.Remove(tmpName)
+	return n, renameErr
 }
 
 func writeAtomic(dir, name string, r io.Reader) error {
