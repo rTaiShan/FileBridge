@@ -112,7 +112,10 @@ directory. Explicit IDs make share permissions and troubleshooting clearer.
 Both roles poll every 500 ms by default. Use `--poll 1s` if lower share traffic
 is more important than latency. The client returns a timeout error after 15
 seconds by default; change it with `--timeout` when an upstream operation is
-expected to take longer.
+expected to take longer. Shared-folder publication failures are retried by the
+server, including transient Windows/SMB rename failures. If a client times out,
+it marks the request as cancelled so the server will not start forwarding it;
+old request and response files are reclaimed by the client's refresher.
 
 ## Call services through the client
 
@@ -162,6 +165,7 @@ heartbeat is current.
 | Result | Meaning |
 | --- | --- |
 | 404 | The requested service is absent from the registry. |
+| 400 | The request metadata or body is invalid or incomplete. |
 | 502 | The registry or heartbeat is unavailable, or the server cannot reach its upstream service. |
 | 504 | The client request deadline expired. |
 | Any upstream HTTP status | The upstream service answered; its status is preserved. |
