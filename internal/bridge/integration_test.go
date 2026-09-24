@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -72,5 +73,54 @@ func TestEndToEndHTTPTransport(t *testing.T) {
 		if tc.want != http.StatusTeapot && !bytes.Equal(w.Body.Bytes(), tc.body) {
 			t.Fatalf("%s: body changed", tc.path)
 		}
+	}
+}
+
+func TestEndToEndTimeoutCancelsSlowUpstream(t *testing.T) {
+	started := make(chan struct{})
+	var startedOnce sync.Once
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		startedOnce.Do(func() { close(started) })
+		select {
+		case <-time.After(150 * time.Millisecond):
+			w.WriteHeader(http.StatusOK)
+		case <-r.Context().Done():
+		}
+	}))
+	defer upstream.Close()
+
+	root := t.TempDir()
+	server := NewServer(root, config.Server{Services: map[string]config.Service{"reports": {Target: upstream.URL}}})
+	server.PollInterval = 5 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = server.Run(ctx) }()
+
+	client, err := NewClient(root, "timeout-client")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.PollInterval, client.Timeout, client.HeartbeatMaxAge = 5*time.Millisecond, 40*time.Millisecond, time.Second
+	deadline := time.Now().Add(time.Second)
+	for client.RefreshRegistry() != nil && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	for !client.serverAlive() && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !client.serverAlive() {
+		t.Fatal("server heartbeat not published")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:9000/reports/slow", nil)
+	res := httptest.NewRecorder()
+	client.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusGatewayTimeout {
+		t.Fatalf("status = %d, want %d", res.Code, http.StatusGatewayTimeout)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("slow upstream was not called")
 	}
 }
