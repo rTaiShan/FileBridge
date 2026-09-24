@@ -160,8 +160,11 @@ func (c *Client) handleProxy(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	defer body.Close()
 	c.copyResponse(w, resp, body)
+	if err := body.Close(); err != nil {
+		c.cleanup(id)
+		return
+	}
 	c.cleanup(id)
 }
 
