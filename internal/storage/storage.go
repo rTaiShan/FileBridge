@@ -12,14 +12,32 @@ import (
 	"time"
 )
 
-func RequestDir(root, clientID string) string {
-	return filepath.Join(root, "server", "inbox", clientID)
+// ServerRequestDir is the v2, server-scoped request queue. A request is
+// published to exactly one server, so another server can never claim it.
+func ServerRequestDir(root, serverID, clientID string) string {
+	return filepath.Join(root, "servers", serverID, "inbox", clientID)
 }
-func ResponseDir(root, clientID string) string {
-	return filepath.Join(root, "clients", clientID, "inbox")
+
+// ServerResponseDir is the v2, server-scoped response queue. Keeping
+// responses under the selected server also prevents response-file collisions.
+func ServerResponseDir(root, serverID, clientID string) string {
+	return filepath.Join(root, "clients", clientID, "responses", serverID)
 }
-func RegistryPath(root string) string  { return filepath.Join(root, "registry", "services.json") }
-func HeartbeatPath(root string) string { return filepath.Join(root, "server", "heartbeat.json") }
+
+func ServerRegistryPath(root, serverID string) string {
+	return filepath.Join(root, "servers", serverID, "registry.json")
+}
+
+func ServerHeartbeatPath(root, serverID string) string {
+	return filepath.Join(root, "servers", serverID, "heartbeat.json")
+}
+
+// The default-server helpers keep internal callers that do not need multiple
+// servers concise. New transport code should use the server-scoped helpers.
+func RequestDir(root, clientID string) string  { return ServerRequestDir(root, "default", clientID) }
+func ResponseDir(root, clientID string) string { return ServerResponseDir(root, "default", clientID) }
+func RegistryPath(root string) string          { return ServerRegistryPath(root, "default") }
+func HeartbeatPath(root string) string         { return ServerHeartbeatPath(root, "default") }
 
 func RequestMeta(id string) string   { return id + ".request.json" }
 func RequestBody(id string) string   { return id + ".request.body" }

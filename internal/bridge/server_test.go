@@ -31,8 +31,8 @@ func TestServerRejectsInvalidRequestMetadata(t *testing.T) {
 		t.Fatalf("write body: %v", err)
 	}
 	meta := protocol.Request{
-		ID:        "different-id",
-		ClientID:  clientID,
+		ID:       "different-id",
+		ClientID: clientID, ServerID: server.ID, ServerInstanceID: server.InstanceID,
 		Service:   "reports",
 		Method:    http.MethodGet,
 		Path:      "/status",
@@ -81,8 +81,8 @@ func TestServerRejectsExpiredRequestBeforeForwarding(t *testing.T) {
 		t.Fatalf("write body: %v", err)
 	}
 	meta := protocol.Request{
-		ID:        requestID,
-		ClientID:  clientID,
+		ID:       requestID,
+		ClientID: clientID, ServerID: server.ID, ServerInstanceID: server.InstanceID,
 		Service:   "reports",
 		Method:    http.MethodGet,
 		Path:      "/status",
@@ -128,8 +128,8 @@ func TestServerReturnsBridgeErrorForUnknownService(t *testing.T) {
 		t.Fatalf("write body: %v", err)
 	}
 	meta := protocol.Request{
-		ID:        requestID,
-		ClientID:  clientID,
+		ID:       requestID,
+		ClientID: clientID, ServerID: server.ID, ServerInstanceID: server.InstanceID,
 		Service:   "missing-service",
 		Method:    http.MethodGet,
 		Path:      "/status",
@@ -174,7 +174,7 @@ func TestServerSkipsCancelledRequest(t *testing.T) {
 	if _, err := storage.WriteBodyAtomic(requestDir, storage.RequestBody(requestID), strings.NewReader("hello")); err != nil {
 		t.Fatalf("write body: %v", err)
 	}
-	meta := protocol.Request{ID: requestID, ClientID: clientID, Service: "reports", Method: http.MethodGet, Path: "/status", Body: protocol.Body{File: storage.RequestBody(requestID), Size: 5}}
+	meta := protocol.Request{ID: requestID, ClientID: clientID, ServerID: server.ID, ServerInstanceID: server.InstanceID, Service: "reports", Method: http.MethodGet, Path: "/status", Body: protocol.Body{File: storage.RequestBody(requestID), Size: 5}}
 	if err := storage.WriteJSONAtomic(requestDir, storage.RequestMeta(requestID), meta); err != nil {
 		t.Fatalf("write metadata: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestServerRejectsMismatchedRequestBody(t *testing.T) {
 	if _, err := storage.WriteBodyAtomic(requestDir, storage.RequestBody(requestID), strings.NewReader("short")); err != nil {
 		t.Fatalf("write body: %v", err)
 	}
-	meta := protocol.Request{ID: requestID, ClientID: clientID, Service: "reports", Method: http.MethodGet, Path: "/status", Body: protocol.Body{File: storage.RequestBody(requestID), Size: 99}}
+	meta := protocol.Request{ID: requestID, ClientID: clientID, ServerID: server.ID, ServerInstanceID: server.InstanceID, Service: "reports", Method: http.MethodGet, Path: "/status", Body: protocol.Body{File: storage.RequestBody(requestID), Size: 99}}
 	if err := storage.WriteJSONAtomic(requestDir, storage.RequestMeta(requestID), meta); err != nil {
 		t.Fatalf("write metadata: %v", err)
 	}
@@ -220,7 +220,7 @@ func TestServerRejectsMissingRequestBody(t *testing.T) {
 	if err := os.MkdirAll(requestDir, 0o750); err != nil {
 		t.Fatalf("mkdir request dir: %v", err)
 	}
-	meta := protocol.Request{ID: requestID, ClientID: clientID, Service: "reports", Method: http.MethodGet, Path: "/status", Body: protocol.Body{File: storage.RequestBody(requestID), Size: 5}}
+	meta := protocol.Request{ID: requestID, ClientID: clientID, ServerID: server.ID, ServerInstanceID: server.InstanceID, Service: "reports", Method: http.MethodGet, Path: "/status", Body: protocol.Body{File: storage.RequestBody(requestID), Size: 5}}
 	if err := storage.WriteJSONAtomic(requestDir, storage.RequestMeta(requestID), meta); err != nil {
 		t.Fatalf("write metadata: %v", err)
 	}

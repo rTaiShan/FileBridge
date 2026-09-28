@@ -20,9 +20,10 @@ func TestBridgeStatusAndHealthReflectHeartbeat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient() error: %v", err)
 	}
-	client.registry = protocol.Registry{Services: map[string]protocol.RegistryService{"reports": {Description: "Reporting API"}}}
+	server := protocol.ServerRegistry{Version: protocol.RegistryVersion, ServerID: "default", InstanceID: "instance-1", UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano), Services: map[string]protocol.RegistryService{"reports": {Description: "Reporting API"}}}
+	client.registry = protocol.Registry{Version: protocol.RegistryVersion, Servers: map[string]protocol.ServerRegistry{"default": server}}
 
-	if err := storage.WriteJSONAtomic(filepath.Dir(storage.HeartbeatPath(root)), filepath.Base(storage.HeartbeatPath(root)), protocol.Heartbeat{UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano), Version: protocol.Version}); err != nil {
+	if err := storage.WriteJSONAtomic(filepath.Dir(storage.ServerHeartbeatPath(root, "default")), filepath.Base(storage.ServerHeartbeatPath(root, "default")), protocol.Heartbeat{ServerID: "default", InstanceID: "instance-1", UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano), Version: protocol.Version}); err != nil {
 		t.Fatalf("write heartbeat: %v", err)
 	}
 
@@ -49,8 +50,8 @@ func TestBridgeStatusAndHealthReflectHeartbeat(t *testing.T) {
 		t.Fatalf("/_bridge/health code = %d, want %d", healthRes.Code, http.StatusOK)
 	}
 
-	stale := protocol.Heartbeat{UpdatedAt: time.Now().Add(-10 * time.Second).UTC().Format(time.RFC3339Nano), Version: protocol.Version}
-	if err := storage.WriteJSONAtomic(filepath.Dir(storage.HeartbeatPath(root)), filepath.Base(storage.HeartbeatPath(root)), stale); err != nil {
+	stale := protocol.Heartbeat{ServerID: "default", InstanceID: "instance-1", UpdatedAt: time.Now().Add(-10 * time.Second).UTC().Format(time.RFC3339Nano), Version: protocol.Version}
+	if err := storage.WriteJSONAtomic(filepath.Dir(storage.ServerHeartbeatPath(root, "default")), filepath.Base(storage.ServerHeartbeatPath(root, "default")), stale); err != nil {
 		t.Fatalf("write stale heartbeat: %v", err)
 	}
 	client.HeartbeatMaxAge = time.Second
@@ -68,11 +69,12 @@ func TestProxyRejectsUnknownServiceAndUnsafePath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient() error: %v", err)
 	}
-	client.registry = protocol.Registry{Services: map[string]protocol.RegistryService{"reports": {Description: "Reporting API"}}}
-	if err := storage.WriteJSONAtomic(filepath.Dir(storage.RegistryPath(root)), filepath.Base(storage.RegistryPath(root)), client.registry); err != nil {
+	server := protocol.ServerRegistry{Version: protocol.RegistryVersion, ServerID: "default", InstanceID: "instance-1", UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano), Services: map[string]protocol.RegistryService{"reports": {Description: "Reporting API"}}}
+	client.registry = protocol.Registry{Version: protocol.RegistryVersion, Servers: map[string]protocol.ServerRegistry{"default": server}}
+	if err := storage.WriteJSONAtomic(filepath.Dir(storage.ServerRegistryPath(root, "default")), filepath.Base(storage.ServerRegistryPath(root, "default")), server); err != nil {
 		t.Fatalf("write registry: %v", err)
 	}
-	if err := storage.WriteJSONAtomic(filepath.Dir(storage.HeartbeatPath(root)), filepath.Base(storage.HeartbeatPath(root)), protocol.Heartbeat{UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano), Version: protocol.Version}); err != nil {
+	if err := storage.WriteJSONAtomic(filepath.Dir(storage.ServerHeartbeatPath(root, "default")), filepath.Base(storage.ServerHeartbeatPath(root, "default")), protocol.Heartbeat{ServerID: "default", InstanceID: "instance-1", UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano), Version: protocol.Version}); err != nil {
 		t.Fatalf("write heartbeat: %v", err)
 	}
 

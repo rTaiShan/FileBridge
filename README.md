@@ -17,21 +17,21 @@ services:
 Only loopback targets are accepted. Start a server and client with:
 
 ```text
-filebridge server --share \\server\share\FileBridge --config services.yaml
-filebridge client --share \\server\share\FileBridge --client-id employee-a
+filebridge server --share \\server\share\FileBridge --server-id reports-east --config services.yaml
+filebridge client --share \\server\share\FileBridge --client-id employee-a --servers reports-east
 ```
 
 The client listens at `127.0.0.1:9000` by default. Its bridge endpoints are
 `/_bridge/status`, `/_bridge/services`, `/_bridge/version`, and
-`/_bridge/health`. All other requests use `/{service}/{remote-path}`.
+`/_bridge/health`. Use `/_bridge/proxy/{server-id}/{service}/{remote-path}` to select a server explicitly. The short `/{service}/{remote-path}` form remains available only when exactly one discovered server advertises that service.
 
 The shared-folder layout is:
 
 ```text
-server/inbox/<client-id>/
-clients/<client-id>/inbox/
-registry/services.json
-server/heartbeat.json
+servers/<server-id>/inbox/<client-id>/
+servers/<server-id>/registry.json
+servers/<server-id>/heartbeat.json
+clients/<client-id>/responses/<server-id>/
 ```
 
 ## Testing
@@ -75,13 +75,13 @@ services:
 3. Start the bridge server:
 
 ```bash
-go run ./cmd/filebridge server --share ./test-share --config services.yaml
+go run ./cmd/filebridge server --share ./test-share --server-id local --config services.yaml
 ```
 
 4. Start the bridge client in a second terminal:
 
 ```bash
-go run ./cmd/filebridge client --share ./test-share --client-id manual-test
+go run ./cmd/filebridge client --share ./test-share --client-id manual-test --servers local
 ```
 
 5. Verify bridge health and service discovery, then proxy a request:
@@ -90,7 +90,7 @@ go run ./cmd/filebridge client --share ./test-share --client-id manual-test
 curl -i http://127.0.0.1:9000/_bridge/status
 curl -i http://127.0.0.1:9000/_bridge/services
 curl -i http://127.0.0.1:9000/_bridge/health
-curl -i "http://127.0.0.1:9000/reports/?check=1"
+curl -i "http://127.0.0.1:9000/_bridge/proxy/local/reports/?check=1"
 ```
 
 Expected results: status reports `server_alive: true`, the services endpoint

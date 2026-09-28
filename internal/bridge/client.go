@@ -19,6 +19,8 @@ import (
 	"filebridge/internal/storage"
 )
 
+const explicitProxyPrefix = "/_bridge/proxy/"
+
 type Client struct {
 	Root            string
 	ID              string
@@ -26,15 +28,47 @@ type Client struct {
 	PollInterval    time.Duration
 	HeartbeatMaxAge time.Duration
 
-	mu       sync.RWMutex
-	registry protocol.Registry
+	mu             sync.RWMutex
+	registry       protocol.Registry
+	allowedServers map[string]struct{}
 }
 
 func NewClient(root, id string) (*Client, error) {
 	if !storage.SafeName(id) {
 		return nil, fmt.Errorf("invalid client ID")
 	}
-	return &Client{Root: root, ID: id, Timeout: 15 * time.Second, PollInterval: 500 * time.Millisecond, HeartbeatMaxAge: 3 * time.Second, registry: protocol.Registry{Services: map[string]protocol.RegistryService{}}}, nil
+	return &Client{
+		Root: root, ID: id, Timeout: 15 * time.Second, PollInterval: 500 * time.Millisecond, HeartbeatMaxAge: 3 * time.Second,
+		registry: protocol.Registry{Version: protocol.RegistryVersion, Servers: map[string]protocol.ServerRegistry{}},
+	}, nil
+}
+
+// SetAllowedServers restricts discovery to explicit, trusted server IDs. An
+// empty list deliberately means discovery is unrestricted for backwards-simple
+// deployments; production deployments should provide this allowlist.
+func (c *Client) SetAllowedServers(ids []string) error {
+	allowed := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if !storage.SafeName(id) {
+			return fmt.Errorf("invalid allowed server ID %q", id)
+		}
+		allowed[id] = struct{}{}
+	}
+	c.mu.Lock()
+	c.allowedServers = allowed
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *Client) serverAllowed(id string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return len(c.allowedServers) == 0 || hasServer(c.allowedServers, id)
+}
+
+func hasServer(servers map[string]struct{}, id string) bool {
+	_, ok := servers[id]
+	return ok
 }
 
 // RunRefresher keeps registry data fresh even when no request is in progress.
@@ -42,7 +76,7 @@ func (c *Client) RunRefresher(ctx context.Context) {
 	if c.PollInterval <= 0 {
 		c.PollInterval = 500 * time.Millisecond
 	}
-	c.RefreshRegistry()
+	_ = c.RefreshRegistry()
 	c.cleanupStale()
 	t := time.NewTicker(c.PollInterval)
 	defer t.Stop()
@@ -51,23 +85,65 @@ func (c *Client) RunRefresher(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			c.RefreshRegistry()
+			_ = c.RefreshRegistry()
 			c.cleanupStale()
 		}
 	}
 }
 
+// RefreshRegistry reads one independently-published registry per server. It
+// never writes or merges a shared registry, avoiding multi-writer races.
 func (c *Client) RefreshRegistry() error {
-	var registry protocol.Registry
-	if err := storage.ReadJSON(storage.RegistryPath(c.Root), &registry); err != nil {
+	entries, err := os.ReadDir(filepath.Join(c.Root, "servers"))
+	if err != nil {
 		return err
 	}
-	if registry.Services == nil {
-		registry.Services = map[string]protocol.RegistryService{}
+	servers := make(map[string]protocol.ServerRegistry)
+	var firstErr error
+	for _, entry := range entries {
+		id := entry.Name()
+		if !entry.IsDir() || !storage.SafeName(id) || !c.serverAllowed(id) {
+			continue
+		}
+		var advertised protocol.ServerRegistry
+		if err := storage.ReadJSON(storage.ServerRegistryPath(c.Root, id), &advertised); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if err := validAdvertisement(id, advertised); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		servers[id] = advertised
+	}
+	if len(servers) == 0 && firstErr != nil {
+		return fmt.Errorf("no valid server registry: %w", firstErr)
+	}
+	if len(servers) == 0 {
+		return fmt.Errorf("no server registries found")
 	}
 	c.mu.Lock()
-	c.registry = registry
+	c.registry = protocol.Registry{Version: protocol.RegistryVersion, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano), Servers: servers}
 	c.mu.Unlock()
+	return nil
+}
+
+func validAdvertisement(directoryID string, registry protocol.ServerRegistry) error {
+	if registry.Version != protocol.RegistryVersion || registry.ServerID != directoryID || !storage.SafeName(registry.ServerID) || !storage.SafeName(registry.InstanceID) || len(registry.Services) == 0 {
+		return fmt.Errorf("invalid server registry for %q", directoryID)
+	}
+	if _, err := time.Parse(time.RFC3339Nano, registry.UpdatedAt); err != nil {
+		return fmt.Errorf("invalid server registry timestamp for %q", directoryID)
+	}
+	for name := range registry.Services {
+		if !storage.SafeName(name) {
+			return fmt.Errorf("invalid service name in registry for %q", directoryID)
+		}
+	}
 	return nil
 }
 
@@ -79,6 +155,10 @@ func (c *Client) registrySnapshot() protocol.Registry {
 
 func (c *Client) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, explicitProxyPrefix) {
+			c.handleExplicitProxy(w, r)
+			return
+		}
 		if strings.HasPrefix(r.URL.Path, "/_bridge/") {
 			c.handleBridge(w, r)
 			return
@@ -92,17 +172,19 @@ func (c *Client) handleBridge(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	registry := c.registrySnapshot()
 	switch r.URL.Path {
 	case "/_bridge/version":
 		writeJSON(w, http.StatusOK, map[string]string{"version": protocol.Version})
 	case "/_bridge/services":
-		writeJSON(w, http.StatusOK, c.registrySnapshot())
+		writeJSON(w, http.StatusOK, registry)
 	case "/_bridge/status":
-		status := map[string]any{"client_id": c.ID, "server_alive": c.serverAlive(), "service_count": len(c.registrySnapshot().Services)}
-		writeJSON(w, http.StatusOK, status)
+		live, services := c.registryHealth(registry)
+		writeJSON(w, http.StatusOK, map[string]any{"client_id": c.ID, "server_alive": live > 0, "server_count": len(registry.Servers), "live_server_count": live, "service_count": services})
 	case "/_bridge/health":
-		if !c.serverAlive() {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "server heartbeat is stale or unavailable"})
+		live, _ := c.registryHealth(registry)
+		if live == 0 {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "no server heartbeat is fresh"})
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -111,13 +193,28 @@ func (c *Client) handleBridge(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (c *Client) registryHealth(registry protocol.Registry) (live, services int) {
+	for _, server := range registry.Servers {
+		services += len(server.Services)
+		if c.serverAlive(server.ServerID, server.InstanceID) {
+			live++
+		}
+	}
+	return live, services
+}
+
+func (c *Client) handleExplicitProxy(w http.ResponseWriter, r *http.Request) {
+	serverID, service, remotePath, err := splitServerServicePath(r.URL.EscapedPath())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	c.proxy(w, r, serverID, service, remotePath, true)
+}
+
 func (c *Client) handleProxy(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/" {
 		http.Error(w, "service name is required", http.StatusNotFound)
-		return
-	}
-	if err := c.RefreshRegistry(); err != nil && len(c.registrySnapshot().Services) == 0 {
-		http.Error(w, "service registry unavailable", http.StatusBadGateway)
 		return
 	}
 	service, remotePath, err := splitServicePath(r.URL.EscapedPath())
@@ -125,12 +222,26 @@ func (c *Client) handleProxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	if _, ok := c.registrySnapshot().Services[service]; !ok {
-		http.Error(w, "service not found", http.StatusNotFound)
+	c.proxy(w, r, "", service, remotePath, false)
+}
+
+func (c *Client) proxy(w http.ResponseWriter, r *http.Request, serverID, service, remotePath string, explicit bool) {
+	if err := c.RefreshRegistry(); err != nil && len(c.registrySnapshot().Servers) == 0 {
+		http.Error(w, "service registry unavailable", http.StatusBadGateway)
 		return
 	}
-	if !c.serverAlive() {
-		http.Error(w, "server bridge is unavailable", http.StatusBadGateway)
+	registry := c.registrySnapshot()
+	server, err := resolveServer(registry, serverID, service, explicit)
+	if err != nil {
+		status := http.StatusNotFound
+		if errors.Is(err, errAmbiguousService) {
+			status = http.StatusConflict
+		}
+		http.Error(w, err.Error(), status)
+		return
+	}
+	if !c.serverAlive(server.ServerID, server.InstanceID) {
+		http.Error(w, "selected server bridge is unavailable", http.StatusBadGateway)
 		return
 	}
 
@@ -139,24 +250,24 @@ func (c *Client) handleProxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not create bridge request", http.StatusInternalServerError)
 		return
 	}
-	dir := storage.RequestDir(c.Root, c.ID)
+	dir := storage.ServerRequestDir(c.Root, server.ServerID, c.ID)
 	n, err := storage.WriteBodyAtomic(dir, storage.RequestBody(id), r.Body)
 	if err != nil {
 		http.Error(w, "could not publish request body", http.StatusBadGateway)
 		return
 	}
 	deadline := time.Now().Add(c.Timeout).UTC()
-	req := protocol.Request{ID: id, ClientID: c.ID, Service: service, Method: r.Method, Path: remotePath, Query: r.URL.RawQuery, Headers: sanitizeHeaders(r.Header), Body: protocol.Body{File: storage.RequestBody(id), Size: n}, CreatedAt: time.Now().UTC().Format(time.RFC3339Nano), Deadline: deadline.Format(time.RFC3339Nano)}
+	req := protocol.Request{ID: id, ClientID: c.ID, ServerID: server.ServerID, ServerInstanceID: server.InstanceID, Service: service, Method: r.Method, Path: remotePath, Query: r.URL.RawQuery, Headers: sanitizeHeaders(r.Header), Body: protocol.Body{File: storage.RequestBody(id), Size: n}, CreatedAt: time.Now().UTC().Format(time.RFC3339Nano), Deadline: deadline.Format(time.RFC3339Nano)}
 	if err := storage.WriteJSONAtomic(dir, storage.RequestMeta(id), req); err != nil {
 		_ = os.Remove(filepath.Join(dir, storage.RequestBody(id)))
 		http.Error(w, "could not publish request", http.StatusBadGateway)
 		return
 	}
 
-	resp, body, err := c.waitForResponse(r.Context(), id, deadline)
+	resp, body, err := c.waitForServerResponse(r.Context(), server.ServerID, server.InstanceID, id, deadline)
 	if err != nil {
-		if err := c.markCancelled(id); err != nil {
-			log.Printf("FileBridge: mark request %s cancelled: %v", id, err)
+		if err := c.markCancelled(server.ServerID, id); err != nil {
+			log.Printf("FileBridge: mark request %s/%s cancelled: %v", server.ServerID, id, err)
 		}
 		if errors.Is(err, context.DeadlineExceeded) {
 			http.Error(w, "bridge request timed out", http.StatusGatewayTimeout)
@@ -167,13 +278,44 @@ func (c *Client) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	c.copyResponse(w, resp, body)
 	if err := body.Close(); err != nil {
-		c.cleanup(id)
+		c.cleanup(server.ServerID, id)
 		return
 	}
-	c.cleanup(id)
+	c.cleanup(server.ServerID, id)
 }
 
-func (c *Client) waitForResponse(requestContext context.Context, id string, deadline time.Time) (protocol.Response, io.ReadCloser, error) {
+var errAmbiguousService = errors.New("service is advertised by multiple servers; use /_bridge/proxy/<server-id>/<service>/...")
+
+func resolveServer(registry protocol.Registry, requestedID, service string, explicit bool) (protocol.ServerRegistry, error) {
+	if explicit {
+		server, ok := registry.Servers[requestedID]
+		if !ok || !hasService(server, service) {
+			return protocol.ServerRegistry{}, fmt.Errorf("service not found")
+		}
+		return server, nil
+	}
+	var matched protocol.ServerRegistry
+	for _, server := range registry.Servers {
+		if !hasService(server, service) {
+			continue
+		}
+		if matched.ServerID != "" {
+			return protocol.ServerRegistry{}, errAmbiguousService
+		}
+		matched = server
+	}
+	if matched.ServerID == "" {
+		return protocol.ServerRegistry{}, fmt.Errorf("service not found")
+	}
+	return matched, nil
+}
+
+func hasService(server protocol.ServerRegistry, service string) bool {
+	_, ok := server.Services[service]
+	return ok
+}
+
+func (c *Client) waitForServerResponse(requestContext context.Context, serverID, instanceID, id string, deadline time.Time) (protocol.Response, io.ReadCloser, error) {
 	poll := c.PollInterval
 	if poll <= 0 {
 		poll = 500 * time.Millisecond
@@ -182,11 +324,12 @@ func (c *Client) waitForResponse(requestContext context.Context, id string, dead
 	defer t.Stop()
 	timeout := time.NewTimer(time.Until(deadline))
 	defer timeout.Stop()
-	path := filepath.Join(storage.ResponseDir(c.Root, c.ID), storage.ResponseMeta(id))
+	dir := storage.ServerResponseDir(c.Root, serverID, c.ID)
+	path := filepath.Join(dir, storage.ResponseMeta(id))
 	for {
 		var response protocol.Response
 		if err := storage.ReadJSON(path, &response); err == nil {
-			if response.ID != id || response.ReplyTo != id {
+			if response.ID != id || response.ReplyTo != id || response.ServerID != serverID || response.ServerInstanceID != instanceID {
 				return protocol.Response{}, nil, fmt.Errorf("invalid response metadata")
 			}
 			if response.Error != nil {
@@ -195,7 +338,7 @@ func (c *Client) waitForResponse(requestContext context.Context, id string, dead
 			if response.Body.File != storage.ResponseBody(id) {
 				return protocol.Response{}, nil, fmt.Errorf("invalid response body metadata")
 			}
-			body, err := os.Open(filepath.Join(storage.ResponseDir(c.Root, c.ID), response.Body.File))
+			body, err := os.Open(filepath.Join(dir, response.Body.File))
 			if err == nil {
 				return response, body, nil
 			}
@@ -224,67 +367,84 @@ func (c *Client) copyResponse(w http.ResponseWriter, response protocol.Response,
 	_, _ = io.Copy(w, body)
 }
 
-func (c *Client) cleanup(id string) {
+func (c *Client) cleanup(serverID, id string) {
 	for _, path := range []string{
-		filepath.Join(storage.RequestDir(c.Root, c.ID), storage.RequestMeta(id)), filepath.Join(storage.RequestDir(c.Root, c.ID), storage.RequestBody(id)),
-		filepath.Join(storage.RequestDir(c.Root, c.ID), storage.RequestCancel(id)), filepath.Join(storage.ResponseDir(c.Root, c.ID), storage.ResponseMeta(id)), filepath.Join(storage.ResponseDir(c.Root, c.ID), storage.ResponseBody(id)),
+		filepath.Join(storage.ServerRequestDir(c.Root, serverID, c.ID), storage.RequestMeta(id)), filepath.Join(storage.ServerRequestDir(c.Root, serverID, c.ID), storage.RequestBody(id)),
+		filepath.Join(storage.ServerRequestDir(c.Root, serverID, c.ID), storage.RequestCancel(id)), filepath.Join(storage.ServerResponseDir(c.Root, serverID, c.ID), storage.ResponseMeta(id)), filepath.Join(storage.ServerResponseDir(c.Root, serverID, c.ID), storage.ResponseBody(id)),
 	} {
 		_ = os.Remove(path)
 	}
 }
 
-func (c *Client) markCancelled(id string) error {
-	dir := storage.RequestDir(c.Root, c.ID)
+func (c *Client) markCancelled(serverAndID ...string) error {
+	serverID, id := "default", ""
+	if len(serverAndID) == 1 {
+		id = serverAndID[0]
+	} else if len(serverAndID) == 2 {
+		serverID, id = serverAndID[0], serverAndID[1]
+	} else {
+		return fmt.Errorf("expected request ID or server ID and request ID")
+	}
+	dir := storage.ServerRequestDir(c.Root, serverID, c.ID)
 	_, err := storage.WriteBodyAtomic(dir, storage.RequestCancel(id), strings.NewReader("cancelled\n"))
 	return err
 }
 
 func (c *Client) cleanupStale() {
+	entries, err := os.ReadDir(filepath.Join(c.Root, "servers"))
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || !storage.SafeName(entry.Name()) {
+			continue
+		}
+		serverID := entry.Name()
+		c.cleanupStaleDir(storage.ServerRequestDir(c.Root, serverID, c.ID), ".request.json", ".request.body", ".request.cancelled")
+		c.cleanupStaleDir(storage.ServerResponseDir(c.Root, serverID, c.ID), ".response.json", ".response.body", "")
+	}
+}
+
+func (c *Client) cleanupStaleDir(dir, metadata, body, cancel string) {
 	maxAge := 2 * c.Timeout
 	if maxAge <= 0 {
 		maxAge = time.Minute
 	}
 	cutoff := time.Now().Add(-maxAge)
-	for _, item := range []struct {
-		dir      string
-		metadata string
-		body     string
-		cancel   string
-	}{
-		{storage.RequestDir(c.Root, c.ID), ".request.json", ".request.body", ".request.cancelled"},
-		{storage.ResponseDir(c.Root, c.ID), ".response.json", ".response.body", ""},
-	} {
-		entries, err := os.ReadDir(item.dir)
-		if err != nil {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), metadata) {
 			continue
 		}
-		for _, entry := range entries {
-			if entry.IsDir() || !strings.HasSuffix(entry.Name(), item.metadata) {
-				continue
-			}
-			info, err := entry.Info()
-			if err != nil || info.ModTime().After(cutoff) {
-				continue
-			}
-			id := strings.TrimSuffix(entry.Name(), item.metadata)
-			if !storage.SafeName(id) {
-				continue
-			}
-			_ = os.Remove(filepath.Join(item.dir, entry.Name()))
-			if item.body != "" {
-				_ = os.Remove(filepath.Join(item.dir, id+item.body))
-			}
-			if item.cancel != "" {
-				_ = os.Remove(filepath.Join(item.dir, id+item.cancel))
-			}
+		info, err := entry.Info()
+		if err != nil || info.ModTime().After(cutoff) {
+			continue
+		}
+		id := strings.TrimSuffix(entry.Name(), metadata)
+		if !storage.SafeName(id) {
+			continue
+		}
+		_ = os.Remove(filepath.Join(dir, entry.Name()))
+		if body != "" {
+			_ = os.Remove(filepath.Join(dir, id+body))
+		}
+		if cancel != "" {
+			_ = os.Remove(filepath.Join(dir, id+cancel))
 		}
 	}
-	c.cleanupOrphanFiles(storage.RequestDir(c.Root, c.ID), ".request.body", storage.RequestMeta)
-	c.cleanupOrphanFiles(storage.RequestDir(c.Root, c.ID), ".request.cancelled", storage.RequestMeta)
-	c.cleanupOrphanFiles(storage.ResponseDir(c.Root, c.ID), ".response.body", storage.ResponseMeta)
+	c.cleanupOrphanFiles(dir, body, func(id string) string { return id + metadata })
+	if cancel != "" {
+		c.cleanupOrphanFiles(dir, cancel, func(id string) string { return id + metadata })
+	}
 }
 
 func (c *Client) cleanupOrphanFiles(dir, suffix string, metadata func(string) string) {
+	if suffix == "" {
+		return
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
@@ -308,9 +468,20 @@ func (c *Client) cleanupOrphanFiles(dir, suffix string, metadata func(string) st
 	}
 }
 
-func (c *Client) serverAlive() bool {
+func (c *Client) serverAlive(target ...string) bool {
+	serverID, instanceID := "default", ""
+	if len(target) == 2 {
+		serverID, instanceID = target[0], target[1]
+	} else if len(target) != 0 {
+		return false
+	}
+	if instanceID == "" {
+		if server, ok := c.registrySnapshot().Servers[serverID]; ok {
+			instanceID = server.InstanceID
+		}
+	}
 	var heartbeat protocol.Heartbeat
-	if storage.ReadJSON(storage.HeartbeatPath(c.Root), &heartbeat) != nil {
+	if storage.ReadJSON(storage.ServerHeartbeatPath(c.Root, serverID), &heartbeat) != nil || heartbeat.ServerID != serverID || heartbeat.InstanceID != instanceID || heartbeat.Version != protocol.Version {
 		return false
 	}
 	updated, err := time.Parse(time.RFC3339Nano, heartbeat.UpdatedAt)
@@ -341,8 +512,32 @@ func splitServicePath(escapedPath string) (string, string, error) {
 	return service, remote, nil
 }
 
+func splitServerServicePath(escapedPath string) (string, string, string, error) {
+	trimmed := strings.TrimPrefix(escapedPath, explicitProxyPrefix)
+	parts := strings.SplitN(trimmed, "/", 3)
+	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", "", fmt.Errorf("server and service name are required")
+	}
+	serverID, serverErr := url.PathUnescape(parts[0])
+	service, serviceErr := url.PathUnescape(parts[1])
+	if serverErr != nil || serviceErr != nil || !storage.SafeName(serverID) || !storage.SafeName(service) {
+		return "", "", "", fmt.Errorf("invalid server or service name")
+	}
+	remote := "/"
+	if len(parts) == 3 {
+		remote += parts[2]
+	}
+	return serverID, service, remote, nil
+}
+
 func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+// waitForResponse is retained for default-server internal callers. New code
+// uses waitForServerResponse with the selected server identity.
+func (c *Client) waitForResponse(requestContext context.Context, id string, deadline time.Time) (protocol.Response, io.ReadCloser, error) {
+	return c.waitForServerResponse(requestContext, "default", "", id, deadline)
 }

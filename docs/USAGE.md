@@ -7,9 +7,8 @@ explicitly registers, and those targets must be bound to loopback.
 
 ## Roles and traffic flow
 
-Run one **server** process on the computer that can reach the real HTTP
-services. Run one **client** process on every employee computer that needs to
-call them.
+Run one or more **server** processes on computers that can reach the real HTTP
+services. Every server needs a stable, unique server ID. Run one **client** process on every employee computer that needs to call them.
 
 ```text
 application -> 127.0.0.1:9000 -> shared folder -> FileBridge server -> 127.0.0.1:<service port>
@@ -32,19 +31,20 @@ FileBridge creates this layout automatically:
 
 ```text
 FileBridge/
-  server/inbox/<client-id>/       # client writes requests; server reads
-  clients/<client-id>/inbox/      # server writes responses; client reads
-  registry/services.json          # server writes; clients read
-  server/heartbeat.json           # server writes; clients read
+  servers/<server-id>/
+    inbox/<client-id>/             # client writes only to this server
+    registry.json                  # this server publishes its services
+    heartbeat.json                 # this server publishes liveness
+  clients/<client-id>/responses/<server-id>/ # this server writes responses
 ```
 
 For a client named `alice-laptop`, grant these permissions:
 
 | Location | Client | Server |
 | --- | --- | --- |
-| `server/inbox/alice-laptop/` | create, write, delete own requests | read |
-| `clients/alice-laptop/inbox/` | read, delete own responses | create, write |
-| `registry/`, `server/heartbeat.json` | read | create, write |
+| `servers/<server-id>/inbox/alice-laptop/` | create, write, delete own requests | read for that server |
+| `clients/alice-laptop/responses/<server-id>/` | read, delete own responses | create, write for that server |
+| `servers/<server-id>/registry.json`, `heartbeat.json` | read | create, write only for that server |
 
 The server requires read access to every client request directory and write
 access to every response directory. For a first local test, a normal writable
@@ -86,13 +86,14 @@ Start the server first, on the service-hosting machine:
 ```bash
 filebridge server \
   --share /mnt/filebridge \
+  --server-id reports-east \
   --config /etc/filebridge/services.yaml
 ```
 
 On a Windows share, the equivalent is:
 
 ```text
-filebridge.exe server --share \\fileserver\FileBridge --config C:\FileBridge\services.yaml
+filebridge.exe server --share \\fileserver\FileBridge --server-id reports-east --config C:\FileBridge\services.yaml
 ```
 
 Then start a client on an employee computer:
@@ -102,7 +103,8 @@ filebridge client \
   --share /mnt/filebridge \
   --client-id alice-laptop \
   --listen 127.0.0.1:9000 \
-  --timeout 15s
+  --timeout 15s \
+  --servers reports-east
 ```
 
 Use a stable, unique `--client-id` per installation. If it is omitted,
@@ -120,25 +122,25 @@ old request and response files are reclaimed by the client's refresher.
 ## Call services through the client
 
 Applications always call the local client, never an upstream port directly.
-The first path segment is the configured service name and is removed before
-forwarding.
+The explicit route selects a server first; its service segment is removed before
+forwarding. The legacy `/{service}/{remote-path}` route is accepted only when exactly one discovered server advertises that service.
 
 ```text
-http://127.0.0.1:9000/{service}/{remote-path}?{query}
+http://127.0.0.1:9000/_bridge/proxy/{server-id}/{service}/{remote-path}?{query}
 ```
 
 Examples:
 
 ```bash
-curl http://127.0.0.1:9000/reports/status
-curl -X POST http://127.0.0.1:9000/reports/generate \
+curl http://127.0.0.1:9000/_bridge/proxy/reports-east/reports/status
+curl -X POST http://127.0.0.1:9000/_bridge/proxy/reports-east/reports/generate \
   -H 'Content-Type: application/json' \
   -d '{"month":"2026-09"}'
 curl -X POST --data-binary @invoice.pdf \
-  http://127.0.0.1:9000/automation/import
+  http://127.0.0.1:9000/_bridge/proxy/reports-east/automation/import
 ```
 
-`/reports/status` is forwarded to `http://127.0.0.1:8000/status` in the
+`/_bridge/proxy/reports-east/reports/status` is forwarded to `http://127.0.0.1:8000/status` in the
 example configuration. Methods, escaped paths, query strings, normal HTTP
 headers, and raw bodies are forwarded. Response status, normal headers, and
 raw bodies are returned to the caller. Hop-by-hop transport headers are not
@@ -172,7 +174,7 @@ heartbeat is current.
 
 If a request returns 502, first call `/_bridge/status`. A false
 `server_alive` value normally means the share is unavailable, the server is
-stopped, or the server cannot update `server/heartbeat.json`. If health is
+stopped, or the selected server cannot update its heartbeat. If health is
 good but a specific service fails, check that its configured target is running
 on the server machine and is listening on the loopback address/port in
 `services.yaml`.

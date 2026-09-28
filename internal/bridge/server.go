@@ -20,6 +20,8 @@ import (
 
 type Server struct {
 	Root         string
+	ID           string
+	InstanceID   string
 	Config       config.Server
 	PollInterval time.Duration
 	HTTPClient   *http.Client
@@ -30,8 +32,25 @@ type Server struct {
 	lastLog  map[string]time.Time
 }
 
+// NewServer creates the default v2 server. Multi-server deployments should
+// use NewServerWithID and assign each server a stable, unique ID.
 func NewServer(root string, cfg config.Server) *Server {
-	return &Server{Root: root, Config: cfg, PollInterval: 500 * time.Millisecond, HTTPClient: &http.Client{Timeout: 30 * time.Second}, inFlight: map[string]struct{}{}, lastLog: map[string]time.Time{}}
+	server, err := NewServerWithID(root, "default", cfg)
+	if err != nil {
+		panic(err)
+	}
+	return server
+}
+
+func NewServerWithID(root, id string, cfg config.Server) (*Server, error) {
+	if !storage.SafeName(id) {
+		return nil, fmt.Errorf("invalid server ID")
+	}
+	instanceID, err := storage.NewID()
+	if err != nil {
+		return nil, err
+	}
+	return &Server{Root: root, ID: id, InstanceID: instanceID, Config: cfg, PollInterval: 500 * time.Millisecond, HTTPClient: &http.Client{Timeout: 30 * time.Second}, inFlight: map[string]struct{}{}, lastLog: map[string]time.Time{}}, nil
 }
 
 func (s *Server) Run(ctx context.Context) error {
@@ -68,16 +87,17 @@ func (s *Server) PublishRegistry() error {
 	for name, service := range s.Config.Services {
 		services[name] = protocol.RegistryService{Description: service.Description}
 	}
-	return storage.WriteJSONAtomic(filepath.Dir(storage.RegistryPath(s.Root)), filepath.Base(storage.RegistryPath(s.Root)), protocol.Registry{Version: 1, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano), Services: services})
+	p := storage.ServerRegistryPath(s.Root, s.ID)
+	return storage.WriteJSONAtomic(filepath.Dir(p), filepath.Base(p), protocol.ServerRegistry{Version: protocol.RegistryVersion, ServerID: s.ID, InstanceID: s.InstanceID, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano), Services: services})
 }
 
 func (s *Server) publishHeartbeat() error {
-	p := storage.HeartbeatPath(s.Root)
-	return storage.WriteJSONAtomic(filepath.Dir(p), filepath.Base(p), protocol.Heartbeat{UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano), Version: protocol.Version})
+	p := storage.ServerHeartbeatPath(s.Root, s.ID)
+	return storage.WriteJSONAtomic(filepath.Dir(p), filepath.Base(p), protocol.Heartbeat{ServerID: s.ID, InstanceID: s.InstanceID, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano), Version: protocol.Version})
 }
 
 func (s *Server) ScanOnce(ctx context.Context) error {
-	base := filepath.Join(s.Root, "server", "inbox")
+	base := filepath.Join(s.Root, "servers", s.ID, "inbox")
 	if err := os.MkdirAll(base, 0750); err != nil {
 		return err
 	}
@@ -145,7 +165,7 @@ func (s *Server) logIssue(key, operation string, err error) {
 }
 
 func (s *Server) handle(parent context.Context, clientID, id, requestDir string) {
-	responseDir := storage.ResponseDir(s.Root, clientID)
+	responseDir := storage.ServerResponseDir(s.Root, s.ID, clientID)
 	defer s.cleanupRequest(requestDir, id)
 	if _, err := os.Stat(filepath.Join(responseDir, storage.ResponseMeta(id))); err == nil {
 		return
@@ -160,6 +180,14 @@ func (s *Server) handle(parent context.Context, clientID, id, requestDir string)
 	}
 	if req.ID != id || req.ClientID != clientID || !storage.SafeName(req.ClientID) || req.Method == "" || !strings.HasPrefix(req.Path, "/") || req.Body.File != storage.RequestBody(id) {
 		s.writeBridgeError(responseDir, id, "invalid_request", "invalid request metadata", http.StatusBadRequest)
+		return
+	}
+	if req.ServerID != s.ID {
+		writeBridgeErrorFor(responseDir, id, req.ServerID, req.ServerInstanceID, "wrong_server", "request is addressed to another server", http.StatusBadRequest)
+		return
+	}
+	if req.ServerInstanceID != s.InstanceID {
+		writeBridgeErrorFor(responseDir, id, req.ServerID, req.ServerInstanceID, "server_instance_changed", "server instance changed before forwarding", http.StatusServiceUnavailable)
 		return
 	}
 	bodyPath := filepath.Join(requestDir, req.Body.File)
@@ -179,7 +207,7 @@ func (s *Server) handle(parent context.Context, clientID, id, requestDir string)
 		return
 	}
 	service, ok := s.Config.Services[req.Service]
-	if !ok {
+	if !ok || !storage.SafeName(req.Service) {
 		s.writeBridgeError(responseDir, id, "service_not_found", "service is not registered", http.StatusNotFound)
 		return
 	}
@@ -253,11 +281,11 @@ func (s *Server) forward(ctx context.Context, target string, req protocol.Reques
 	if err != nil {
 		return err
 	}
-	return storage.WriteJSONAtomic(responseDir, storage.ResponseMeta(req.ID), protocol.Response{ID: req.ID, ReplyTo: req.ID, Status: resp.StatusCode, Headers: sanitizeHeaders(resp.Header), Body: protocol.Body{File: storage.ResponseBody(req.ID), Size: n}, CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)})
+	return storage.WriteJSONAtomic(responseDir, storage.ResponseMeta(req.ID), protocol.Response{ID: req.ID, ReplyTo: req.ID, ServerID: req.ServerID, ServerInstanceID: req.ServerInstanceID, Status: resp.StatusCode, Headers: sanitizeHeaders(resp.Header), Body: protocol.Body{File: storage.ResponseBody(req.ID), Size: n}, CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)})
 }
 
 func (s *Server) writeBridgeError(dir, id, code, message string, status int) {
-	_ = storage.WriteJSONAtomic(dir, storage.ResponseMeta(id), protocol.Response{ID: id, ReplyTo: id, Status: status, Body: protocol.Body{File: "", Size: 0}, CreatedAt: time.Now().UTC().Format(time.RFC3339Nano), Error: &protocol.BridgeError{Code: code, Message: message}})
+	_ = storage.WriteJSONAtomic(dir, storage.ResponseMeta(id), protocol.Response{ID: id, ReplyTo: id, ServerID: s.ID, ServerInstanceID: s.InstanceID, Status: status, Body: protocol.Body{File: "", Size: 0}, CreatedAt: time.Now().UTC().Format(time.RFC3339Nano), Error: &protocol.BridgeError{Code: code, Message: message}})
 }
 
 func joinURLPath(a, b string) string {
@@ -278,4 +306,8 @@ func sanitizeHeaders(in http.Header) http.Header {
 		}
 	}
 	return out
+}
+
+func writeBridgeErrorFor(dir, id, serverID, instanceID, code, message string, status int) {
+	_ = storage.WriteJSONAtomic(dir, storage.ResponseMeta(id), protocol.Response{ID: id, ReplyTo: id, ServerID: serverID, ServerInstanceID: instanceID, Status: status, Body: protocol.Body{File: "", Size: 0}, CreatedAt: time.Now().UTC().Format(time.RFC3339Nano), Error: &protocol.BridgeError{Code: code, Message: message}})
 }

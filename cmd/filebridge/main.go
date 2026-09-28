@@ -36,9 +36,10 @@ func main() {
 func runServer(args []string) {
 	fs := flag.NewFlagSet("server", flag.ExitOnError)
 	share, configPath := fs.String("share", "", "shared FileBridge directory"), fs.String("config", "", "server services configuration")
+	serverID := fs.String("server-id", "", "stable unique server ID (required)")
 	poll := fs.Duration("poll", 500*time.Millisecond, "shared-folder polling interval")
 	fs.Parse(args)
-	if *share == "" || *configPath == "" {
+	if *share == "" || *configPath == "" || *serverID == "" {
 		fs.Usage()
 		os.Exit(2)
 	}
@@ -46,11 +47,14 @@ func runServer(args []string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	server := bridge.NewServer(*share, cfg)
+	server, err := bridge.NewServerWithID(*share, *serverID, cfg)
+	if err != nil {
+		log.Fatal(err)
+	}
 	server.PollInterval = *poll
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	log.Printf("FileBridge server: %d service(s), share %s", len(cfg.Services), *share)
+	log.Printf("FileBridge server %s: %d service(s), share %s", *serverID, len(cfg.Services), *share)
 	if err := server.Run(ctx); err != nil {
 		log.Fatal(err)
 	}
@@ -62,6 +66,7 @@ func runClient(args []string) {
 	listen := fs.String("listen", "127.0.0.1:9000", "local HTTP listener")
 	timeout, poll := fs.Duration("timeout", 15*time.Second, "request timeout"), fs.Duration("poll", 500*time.Millisecond, "shared-folder polling interval")
 	state := fs.String("state", defaultStatePath(), "client state directory")
+	trustedServers := fs.String("servers", "", "comma-separated trusted server IDs (empty discovers all)")
 	fs.Parse(args)
 	if *share == "" {
 		fs.Usage()
@@ -77,6 +82,20 @@ func runClient(args []string) {
 	client, err := bridge.NewClient(*share, *id)
 	if err != nil {
 		log.Fatal(err)
+	}
+	if *trustedServers != "" {
+		ids := make([]string, 0)
+		for _, id := range strings.Split(*trustedServers, ",") {
+			if id = strings.TrimSpace(id); id != "" {
+				ids = append(ids, id)
+			}
+		}
+		if len(ids) == 0 {
+			log.Fatal("--servers must contain at least one server ID")
+		}
+		if err := client.SetAllowedServers(ids); err != nil {
+			log.Fatal(err)
+		}
 	}
 	client.Timeout, client.PollInterval = *timeout, *poll
 	client.HeartbeatMaxAge = 3 * *poll
