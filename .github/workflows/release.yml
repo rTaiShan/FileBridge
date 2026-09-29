@@ -45,7 +45,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ steps.version.outputs.tag }}" \
-            filebridge-windows-amd64.exe \
-            --title "FileBridge ${{ steps.version.outputs.version }}" \
-            --generate-notes
+          tag="${{ steps.version.outputs.tag }}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" filebridge-windows-amd64.exe --clobber
+          else
+            gh release create "$tag" \
+              filebridge-windows-amd64.exe \
+              --title "FileBridge ${{ steps.version.outputs.version }}" \
+              --generate-notes
+          fi
