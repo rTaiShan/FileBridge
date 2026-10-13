@@ -43,6 +43,14 @@ func TestBridgeStatusAndHealthReflectHeartbeat(t *testing.T) {
 	if got := status["service_count"]; got != float64(1) {
 		t.Fatalf("status[service_count] = %v, want 1", got)
 	}
+	servers, ok := status["servers"].([]any)
+	if !ok || len(servers) != 1 {
+		t.Fatalf("status[servers] = %#v, want one server", status["servers"])
+	}
+	serverStatus, ok := servers[0].(map[string]any)
+	if !ok || serverStatus["server_id"] != "default" || serverStatus["alive"] != true {
+		t.Fatalf("status server = %#v, want live default server", servers[0])
+	}
 
 	healthRes := httptest.NewRecorder()
 	client.handleBridge(healthRes, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:9000/_bridge/health", nil))
@@ -60,6 +68,37 @@ func TestBridgeStatusAndHealthReflectHeartbeat(t *testing.T) {
 	client.handleBridge(staleHealth, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:9000/_bridge/health", nil))
 	if staleHealth.Code != http.StatusBadGateway {
 		t.Fatalf("/_bridge/health with stale heartbeat code = %d, want %d", staleHealth.Code, http.StatusBadGateway)
+	}
+}
+
+func TestDashboardIsServedByClientHandler(t *testing.T) {
+	client, err := NewClient(t.TempDir(), "alice")
+	if err != nil {
+		t.Fatalf("NewClient() error: %v", err)
+	}
+
+	redirect := httptest.NewRecorder()
+	client.Handler().ServeHTTP(redirect, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:9000/_bridge/ui", nil))
+	if redirect.Code != http.StatusTemporaryRedirect || redirect.Header().Get("Location") != "/_bridge/ui/" {
+		t.Fatalf("dashboard redirect = %d %q, want temporary redirect to UI", redirect.Code, redirect.Header().Get("Location"))
+	}
+
+	response := httptest.NewRecorder()
+	client.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:9000/_bridge/ui/", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("dashboard code = %d, want 200", response.Code)
+	}
+	if got := response.Header().Get("Content-Type"); got != "text/html; charset=utf-8" {
+		t.Fatalf("dashboard Content-Type = %q", got)
+	}
+	if !strings.Contains(response.Body.String(), "FileBridge Client") || !strings.Contains(response.Body.String(), ">Services<") || !strings.Contains(response.Body.String(), "Servers") || !strings.Contains(response.Body.String(), "Documentation") {
+		t.Fatal("dashboard did not contain the expected client, service, server, and documentation views")
+	}
+
+	rootRedirect := httptest.NewRecorder()
+	client.Handler().ServeHTTP(rootRedirect, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:9000/", nil))
+	if rootRedirect.Code != http.StatusTemporaryRedirect || rootRedirect.Header().Get("Location") != "/_bridge/ui/" {
+		t.Fatalf("root redirect = %d %q, want temporary redirect to UI", rootRedirect.Code, rootRedirect.Header().Get("Location"))
 	}
 }
 

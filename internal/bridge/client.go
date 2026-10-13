@@ -11,12 +11,14 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"filebridge/internal/protocol"
 	"filebridge/internal/storage"
+	"filebridge/internal/webui"
 )
 
 const explicitProxyPrefix = "/_bridge/proxy/"
@@ -155,6 +157,18 @@ func (c *Client) registrySnapshot() protocol.Registry {
 
 func (c *Client) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" {
+			http.Redirect(w, r, "/_bridge/ui/", http.StatusTemporaryRedirect)
+			return
+		}
+		if r.URL.Path == "/_bridge/ui" {
+			http.Redirect(w, r, "/_bridge/ui/", http.StatusTemporaryRedirect)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/_bridge/ui/") {
+			webui.Handler(w, r)
+			return
+		}
 		if strings.HasPrefix(r.URL.Path, explicitProxyPrefix) {
 			c.handleExplicitProxy(w, r)
 			return
@@ -180,7 +194,7 @@ func (c *Client) handleBridge(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, registry)
 	case "/_bridge/status":
 		live, services := c.registryHealth(registry)
-		writeJSON(w, http.StatusOK, map[string]any{"client_id": c.ID, "server_alive": live > 0, "server_count": len(registry.Servers), "live_server_count": live, "service_count": services})
+		writeJSON(w, http.StatusOK, map[string]any{"client_id": c.ID, "version": protocol.Version, "server_alive": live > 0, "server_count": len(registry.Servers), "live_server_count": live, "service_count": services, "servers": c.serverStatuses(registry)})
 	case "/_bridge/health":
 		live, _ := c.registryHealth(registry)
 		if live == 0 {
@@ -191,6 +205,24 @@ func (c *Client) handleBridge(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// serverStatus is a read-only dashboard summary. It never exposes upstream
+// target addresses, which remain private to the server process.
+type serverStatus struct {
+	ServerID   string `json:"server_id"`
+	InstanceID string `json:"instance_id"`
+	UpdatedAt  string `json:"updated_at"`
+	Alive      bool   `json:"alive"`
+}
+
+func (c *Client) serverStatuses(registry protocol.Registry) []serverStatus {
+	servers := make([]serverStatus, 0, len(registry.Servers))
+	for _, server := range registry.Servers {
+		servers = append(servers, serverStatus{ServerID: server.ServerID, InstanceID: server.InstanceID, UpdatedAt: server.UpdatedAt, Alive: c.serverAlive(server.ServerID, server.InstanceID)})
+	}
+	sort.Slice(servers, func(i, j int) bool { return servers[i].ServerID < servers[j].ServerID })
+	return servers
 }
 
 func (c *Client) registryHealth(registry protocol.Registry) (live, services int) {

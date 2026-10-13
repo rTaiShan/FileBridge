@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FileBridge Client</title>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; background: #f6f7fb; color: #19202a; }
+    * { box-sizing: border-box; } body { margin: 0; } main { max-width: 1050px; margin: 0 auto; padding: 28px 20px 48px; }
+    header { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; margin-bottom: 24px; }
+    h1 { margin: 0; font-size: 1.65rem; } h2 { margin: 0 0 16px; font-size: 1.1rem; } h3 { margin: 0; font-size: 1rem; }
+    .muted { color: #5c6675; } .subtle { font-size: .875rem; color: #5c6675; } .right { text-align: right; }
+    button { border: 1px solid #c7ced8; border-radius: 6px; padding: 8px 12px; font: inherit; background: #fff; color: #19202a; cursor: pointer; }
+    button:hover { background: #f0f3f7; } .card { background: #fff; border: 1px solid #dfe3ea; border-radius: 10px; padding: 20px; margin-top: 16px; box-shadow: 0 1px 2px #19202a0b; }
+    .status { display: inline-flex; align-items: center; gap: 7px; font-weight: 600; } .dot { width: 10px; height: 10px; border-radius: 50%; background: #7b8794; display: inline-block; }
+    .live .dot { background: #16803c; } .down .dot { background: #c43d30; } .unknown .dot { background: #bd7700; }
+    .summary { display: grid; grid-template-columns: repeat(4, minmax(120px, 1fr)); gap: 16px; } .metric { display: grid; gap: 3px; } .metric strong { font-size: 1.25rem; }
+    .tabs { display: flex; gap: 8px; border-bottom: 1px solid #dfe3ea; margin-bottom: 16px; } .tab { border: 0; border-radius: 0; background: transparent; padding: 10px 12px; border-bottom: 3px solid transparent; }
+    .tab[aria-selected="true"] { border-bottom-color: #1769d1; color: #084f9e; font-weight: 700; } .view[hidden] { display: none; }
+    .server { border-top: 1px solid #e7eaf0; padding: 16px 0; } .server:first-child { border-top: 0; padding-top: 0; }
+    .server-head { display: flex; justify-content: space-between; gap: 16px; align-items: center; } .server-meta { margin-top: 6px; }
+    .services { margin: 16px 0 0; border: 1px solid #e1e5eb; border-radius: 7px; overflow: hidden; width: 100%; border-collapse: collapse; }
+    th, td { padding: 11px 12px; border-bottom: 1px solid #e7eaf0; text-align: left; vertical-align: top; } tr:last-child td { border-bottom: 0; } th { font-size: .82rem; color: #5c6675; background: #f8f9fb; }
+    code { font-size: .82rem; overflow-wrap: anywhere; } .url { display: flex; align-items: flex-start; gap: 8px; } .url button { flex: none; padding: 4px 8px; font-size: .82rem; }
+    .docs { display: grid; gap: 24px; max-width: 850px; } .docs h2 { margin-bottom: 6px; } .docs h3 { margin: 0 0 8px; } .docs p { margin: 0 0 9px; line-height: 1.5; } .command { display: block; padding: 11px 12px; background: #f3f5f8; border: 1px solid #e1e5eb; border-radius: 6px; white-space: pre-wrap; }
+    .notice { border-left: 4px solid #bd7700; background: #fff8e6; padding: 12px 14px; border-radius: 4px; } .error { border-left-color: #c43d30; background: #fff0ee; }
+    @media (prefers-color-scheme: dark) { :root { background: #11161d; color: #edf1f5; } .card, button { background: #1a222c; color: #edf1f5; border-color: #33404e; } button:hover { background: #24303d; } .muted, .subtle, th { color: #aeb8c5; } th, .command { background: #161e27; } .services, th, td, .server, .tabs, .command { border-color: #33404e; } .notice { background: #352a10; } .error { background: #3a1e1a; } .tab[aria-selected="true"] { color: #80b7ff; } }
+    @media (max-width: 700px) { header, .server-head { display: block; } .right { text-align: left; margin-top: 12px; } .summary { grid-template-columns: repeat(2, 1fr); } .services { display: block; overflow-x: auto; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div><h1>FileBridge Client</h1><div id="bridge-url" class="muted"></div></div>
+      <div class="right"><div id="connection" class="status unknown"><span class="dot"></span><span>Loading</span></div><div id="refreshed" class="subtle"></div></div>
+    </header>
+    <section class="card summary" aria-label="Client summary">
+      <div class="metric"><span class="subtle">Client ID</span><strong id="client-id">—</strong></div>
+      <div class="metric"><span class="subtle">Servers</span><strong id="server-count">—</strong></div>
+      <div class="metric"><span class="subtle">Live servers</span><strong id="live-count">—</strong></div>
+      <div class="metric"><span class="subtle">Services</span><strong id="service-count">—</strong></div>
+    </section>
+    <section class="card">
+      <div class="tabs" role="tablist" aria-label="Dashboard views">
+        <button class="tab" role="tab" aria-selected="true" aria-controls="services" id="services-tab">Services</button>
+        <button class="tab" role="tab" aria-selected="false" aria-controls="servers" id="servers-tab">Servers</button>
+        <button class="tab" role="tab" aria-selected="false" aria-controls="documentation" id="documentation-tab">Documentation</button>
+        <span style="flex:1"></span><button id="refresh" type="button">Refresh</button>
+      </div>
+      <div id="message" hidden></div>
+      <div class="view" id="services" role="tabpanel" aria-labelledby="services-tab"><h2>Available services</h2><div id="service-list"></div></div>
+      <div class="view" id="servers" role="tabpanel" aria-labelledby="servers-tab" hidden><h2>Servers</h2><div id="server-list"></div></div>
+      <div class="view docs" id="documentation" role="tabpanel" aria-labelledby="documentation-tab" hidden>
+        <section><h2>Using FileBridge</h2><p>Applications send requests to this local bridge. FileBridge carries them through the shared folder to a server, which forwards them to an explicitly registered service.</p></section>
+        <section><h3>Start a client</h3><p>Run one client on each computer that needs access to registered services.</p><code class="command">filebridge client --share &lt;shared-folder&gt; --client-id &lt;client-id&gt; --servers &lt;trusted-server-id&gt;</code><p class="subtle">The local listener defaults to <code>127.0.0.1:9000</code>. Omit <code>--client-id</code> to generate and persist one automatically. Omit <code>--servers</code> only when unrestricted server discovery is intended.</p></section>
+        <section><h3>Start a server</h3><p>Run a server on a computer that can reach the registered HTTP services.</p><code class="command">filebridge server --share &lt;shared-folder&gt; --server-id &lt;server-id&gt; --config &lt;services.yaml&gt;</code><p class="subtle">The server publishes its service registry and heartbeat to the shared folder. Registered targets must be local to the server.</p></section>
+        <section><h3>Local endpoints</h3><table class="services"><thead><tr><th>Endpoint</th><th>Purpose</th></tr></thead><tbody>
+          <tr><td><code>/</code></td><td>This dashboard.</td></tr>
+          <tr><td><code>/_bridge/ui/</code></td><td>Dashboard directly.</td></tr>
+          <tr><td><code>/_bridge/status</code></td><td>Client and per-server health summary.</td></tr>
+          <tr><td><code>/_bridge/services</code></td><td>Discovered server and service registry.</td></tr>
+          <tr><td><code>/_bridge/version</code></td><td>FileBridge version.</td></tr>
+          <tr><td><code>/_bridge/health</code></td><td>Returns 200 when at least one server heartbeat is fresh.</td></tr>
+        </tbody></table></section>
+        <section><h3>Call a service</h3><p>Use an explicit route when selecting a server:</p><code class="command" id="proxy-example">/_bridge/proxy/&lt;server-id&gt;/&lt;service&gt;/&lt;remote-path&gt;</code><p class="subtle">The shorter <code>/&lt;service&gt;/&lt;remote-path&gt;</code> route works only when exactly one discovered server exposes that service. The Services tab always provides the unambiguous explicit URL.</p></section>
+      </div>
+    </section>
+  </main>
+  <script>
+    const bridgeURL = window.location.origin;
+    const state = { status: null, registry: null };
+    document.querySelector('#bridge-url').textContent = `Local bridge: ${bridgeURL}`;
+    document.querySelector('#proxy-example').textContent = `${bridgeURL}/_bridge/proxy/<server-id>/<service>/<remote-path>`;
+    const esc = value => String(value ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+    const time = value => value ? new Date(value).toLocaleString() : 'Unknown';
+    const explicitURL = (server, service) => `${bridgeURL}/_bridge/proxy/${encodeURIComponent(server)}/${encodeURIComponent(service)}/`;
+    function statusClass(alive) { return alive ? 'live' : 'down'; }
+    function statusText(alive) { return alive ? 'Live' : 'Unavailable'; }
+    function setMessage(text, error = false) { const node = document.querySelector('#message'); node.hidden = !text; node.className = text ? `notice${error ? ' error' : ''}` : ''; node.textContent = text || ''; }
+    async function copy(text, button) { try { await navigator.clipboard.writeText(text); const old = button.textContent; button.textContent = 'Copied'; setTimeout(() => button.textContent = old, 1200); } catch { window.prompt('Copy this URL:', text); } }
+    function serviceRows(server, unique) {
+      return Object.entries(server.services || {}).sort(([a], [b]) => a.localeCompare(b)).map(([name, service]) => {
+        const url = explicitURL(server.server_id, name);
+        const short = unique.get(name) === 1 ? `${bridgeURL}/${encodeURIComponent(name)}/` : '';
+        return `<tr><td><strong>${esc(name)}</strong></td><td>${esc(service.description || '—')}</td><td><div class="url"><code>${esc(url)}</code><button data-copy="${esc(url)}">Copy</button></div>${short ? `<div class="subtle">Short URL: <code>${esc(short)}</code></div>` : ''}</td></tr>`;
+      }).join('');
+    }
+    function serviceDirectoryRows(servers, details, unique) {
+      return servers.flatMap(server => Object.entries(server.services || {}).map(([name, service]) => ({server, name, service}))).sort((a, b) => a.name.localeCompare(b.name) || a.server.server_id.localeCompare(b.server.server_id)).map(({server, name, service}) => {
+        const url = explicitURL(server.server_id, name);
+        const short = unique.get(name) === 1 ? `${bridgeURL}/${encodeURIComponent(name)}/` : '';
+        const alive = !!details.get(server.server_id)?.alive;
+        return `<tr><td><strong>${esc(name)}</strong></td><td>${esc(server.server_id)}</td><td><span class="status ${statusClass(alive)}"><span class="dot"></span>${statusText(alive)}</span></td><td>${esc(service.description || '—')}</td><td><div class="url"><code>${esc(url)}</code><button data-copy="${esc(url)}">Copy</button></div>${short ? `<div class="subtle">Short URL: <code>${esc(short)}</code></div>` : ''}</td></tr>`;
+      }).join('');
+    }
+    function render() {
+      const { status, registry } = state; if (!status || !registry) return;
+      const servers = Object.values(registry.servers || {}).sort((a, b) => {
+        const aliveA = status.servers?.find(s => s.server_id === a.server_id)?.alive ? 0 : 1;
+        const aliveB = status.servers?.find(s => s.server_id === b.server_id)?.alive ? 0 : 1;
+        return aliveA - aliveB || a.server_id.localeCompare(b.server_id);
+      });
+      const details = new Map((status.servers || []).map(server => [server.server_id, server]));
+      const unique = new Map(); servers.forEach(server => Object.keys(server.services || {}).forEach(name => unique.set(name, (unique.get(name) || 0) + 1)));
+      document.querySelector('#client-id').textContent = status.client_id || '—';
+      document.querySelector('#server-count').textContent = status.server_count ?? 0;
+      document.querySelector('#live-count').textContent = status.live_server_count ?? 0;
+      document.querySelector('#service-count').textContent = status.service_count ?? 0;
+      const connected = status.server_alive;
+      document.querySelector('#connection').className = `status ${connected ? 'live' : 'down'}`;
+      document.querySelector('#connection').lastElementChild.textContent = connected ? 'Connected' : 'No live servers';
+      document.querySelector('#refreshed').textContent = `Refreshed ${new Date().toLocaleTimeString()}`;
+      if (!servers.length) setMessage('No server registries were found. Check shared-folder access and confirm a FileBridge server is running.', true);
+      else if (!connected) setMessage('Server registries were found, but no server heartbeat is fresh. Check that a FileBridge server is running.', true);
+      else setMessage('');
+      const directory = serviceDirectoryRows(servers, details, unique);
+      document.querySelector('#service-list').innerHTML = directory ? `<table class="services"><thead><tr><th>Service</th><th>Server</th><th>Status</th><th>Description</th><th>Local proxy URL</th></tr></thead><tbody>${directory}</tbody></table>` : '<p class="muted">No services are available.</p>';
+      document.querySelector('#server-list').innerHTML = servers.map(server => { const detail = details.get(server.server_id) || {}; return `<article class="server"><div class="server-head"><div><h3>${esc(server.server_id)}</h3><div class="server-meta subtle">${Object.keys(server.services || {}).length} service${Object.keys(server.services || {}).length === 1 ? '' : 's'} · Registry updated ${esc(time(server.updated_at))}${server.instance_id ? ` · Instance ${esc(server.instance_id)}` : ''}</div></div><span class="status ${statusClass(!!detail.alive)}"><span class="dot"></span>${statusText(!!detail.alive)}</span></div><table class="services"><thead><tr><th>Service</th><th>Description</th><th>Local proxy URL</th></tr></thead><tbody>${serviceRows(server, unique)}</tbody></table></article>`; }).join('') || '<p class="muted">No servers are available.</p>';
+      document.querySelectorAll('[data-copy]').forEach(button => button.addEventListener('click', () => copy(button.dataset.copy, button)));
+    }
+    async function refresh() { const button = document.querySelector('#refresh'); button.disabled = true; try { const [status, registry] = await Promise.all(['/_bridge/status', '/_bridge/services'].map(async url => { const response = await fetch(url, {cache: 'no-store'}); if (!response.ok) throw new Error(`Request failed (${response.status})`); return response.json(); })); state.status = status; state.registry = registry; render(); } catch (error) { setMessage(`Could not load bridge status: ${error.message}`, true); document.querySelector('#connection').className = 'status down'; document.querySelector('#connection').lastElementChild.textContent = 'Unavailable'; } finally { button.disabled = false; } }
+    document.querySelectorAll('[role="tab"]').forEach(tab => tab.addEventListener('click', () => { document.querySelectorAll('[role="tab"]').forEach(item => item.setAttribute('aria-selected', String(item === tab))); document.querySelectorAll('[role="tabpanel"]').forEach(panel => panel.hidden = panel.id !== tab.getAttribute('aria-controls')); }));
+    document.querySelector('#refresh').addEventListener('click', refresh); refresh(); setInterval(refresh, 3000);
+  </script>
+</body>
+</html>

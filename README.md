@@ -21,7 +21,8 @@ filebridge server --share \\server\share\FileBridge --server-id reports-east --c
 filebridge client --share \\server\share\FileBridge --client-id employee-a --servers reports-east
 ```
 
-The client listens at `127.0.0.1:9000` by default. Its bridge endpoints are
+The client listens at `127.0.0.1:9000` by default. Its read-only local
+dashboard is available at `/_bridge/ui/`. Its bridge endpoints are
 `/_bridge/status`, `/_bridge/services`, `/_bridge/version`, and
 `/_bridge/health`. Use `/_bridge/proxy/{server-id}/{service}/{remote-path}` to select a server explicitly. The short `/{service}/{remote-path}` form remains available only when exactly one discovered server advertises that service.
 

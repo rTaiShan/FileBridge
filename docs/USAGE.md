@@ -157,6 +157,12 @@ curl -i http://127.0.0.1:9000/_bridge/version
 curl -i http://127.0.0.1:9000/_bridge/health
 ```
 
+For a read-only browser dashboard, open
+`http://127.0.0.1:9000/_bridge/ui/`. It shows the local client identity,
+connection health, discovered servers, and the services each server exposes.
+The dashboard only displays explicitly-published service information; it does
+not expose server-local target URLs or change client settings.
+
 `/_bridge/status` includes the client ID and whether the server heartbeat is
 fresh. `/_bridge/services` shows the sanitized service registry; it never
 reveals target URLs. `/_bridge/health` returns 200 only while the server
