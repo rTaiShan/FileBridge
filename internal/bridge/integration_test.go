@@ -3,14 +3,17 @@ package bridge
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync"
 	"testing"
 	"time"
 
 	"filebridge/internal/config"
+	"filebridge/internal/storage"
 )
 
 func TestEndToEndHTTPTransport(t *testing.T) {
@@ -74,6 +77,18 @@ func TestEndToEndHTTPTransport(t *testing.T) {
 			t.Fatalf("%s: body changed", tc.path)
 		}
 	}
+	activityResponse := httptest.NewRecorder()
+	client.Handler().ServeHTTP(activityResponse, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:9000/_bridge/activity", nil))
+	if activityResponse.Code != http.StatusOK {
+		t.Fatalf("activity status = %d, want %d", activityResponse.Code, http.StatusOK)
+	}
+	var activity []requestActivity
+	if err := json.Unmarshal(activityResponse.Body.Bytes(), &activity); err != nil {
+		t.Fatalf("decode activity: %v", err)
+	}
+	if len(activity) != len(cases) || activity[0].Status != http.StatusTeapot || activity[0].Outcome != "completed" {
+		t.Fatalf("activity = %#v, want latest completed teapot request", activity)
+	}
 }
 
 func TestEndToEndTimeoutCancelsSlowUpstream(t *testing.T) {
@@ -82,7 +97,7 @@ func TestEndToEndTimeoutCancelsSlowUpstream(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		startedOnce.Do(func() { close(started) })
 		select {
-		case <-time.After(150 * time.Millisecond):
+		case <-time.After(300 * time.Millisecond):
 			w.WriteHeader(http.StatusOK)
 		case <-r.Context().Done():
 		}
@@ -93,14 +108,17 @@ func TestEndToEndTimeoutCancelsSlowUpstream(t *testing.T) {
 	server := NewServer(root, config.Server{Services: map[string]config.Service{"reports": {Target: upstream.URL}}})
 	server.PollInterval = 5 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() { _ = server.Run(ctx) }()
+	serverDone := make(chan struct{})
+	go func() {
+		_ = server.Run(ctx)
+		close(serverDone)
+	}()
 
 	client, err := NewClient(root, "timeout-client")
 	if err != nil {
 		t.Fatal(err)
 	}
-	client.PollInterval, client.Timeout, client.HeartbeatMaxAge = 5*time.Millisecond, 40*time.Millisecond, time.Second
+	client.PollInterval, client.Timeout, client.HeartbeatMaxAge = 5*time.Millisecond, 100*time.Millisecond, time.Second
 	deadline := time.Now().Add(time.Second)
 	for client.RefreshRegistry() != nil && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
@@ -123,4 +141,24 @@ func TestEndToEndTimeoutCancelsSlowUpstream(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("slow upstream was not called")
 	}
+	cancel()
+	select {
+	case <-serverDone:
+	case <-time.After(time.Second):
+		t.Fatal("server did not stop")
+	}
+	responseDir := storage.ServerResponseDir(root, server.ID, client.ID)
+	deadline = time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		entries, err := os.ReadDir(responseDir)
+		if err == nil && len(entries) > 0 {
+			if err := os.RemoveAll(responseDir); err != nil {
+				t.Fatalf("remove test response directory: %v", err)
+			}
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	entries, _ := os.ReadDir(responseDir)
+	t.Fatalf("response directory did not drain: %v", entries)
 }

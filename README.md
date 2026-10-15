@@ -23,8 +23,11 @@ filebridge client --share \\server\share\FileBridge --client-id employee-a --ser
 
 The client listens at `127.0.0.1:9000` by default. Its read-only local
 dashboard is available at `/_bridge/ui/`. Its bridge endpoints are
-`/_bridge/status`, `/_bridge/services`, `/_bridge/version`, and
-`/_bridge/health`. Use `/_bridge/proxy/{server-id}/{service}/{remote-path}` to select a server explicitly. The short `/{service}/{remote-path}` form remains available only when exactly one discovered server advertises that service.
+`/_bridge/status`, `/_bridge/services`, `/_bridge/activity`, `/_bridge/version`,
+and `/_bridge/health`. The status response includes check and registry refresh
+timestamps. Activity retains the 50 most recent request/response metadata
+records in memory; it does not retain request/response bodies or headers. Use
+`/_bridge/proxy/{server-id}/{service}/{remote-path}` to select a server explicitly. The short `/{service}/{remote-path}` form remains available only when exactly one discovered server advertises that service.
 
 The shared-folder layout is:
 
@@ -90,6 +93,7 @@ go run ./cmd/filebridge client --share ./test-share --client-id manual-test --se
 ```bash
 curl -i http://127.0.0.1:9000/_bridge/status
 curl -i http://127.0.0.1:9000/_bridge/services
+curl -i http://127.0.0.1:9000/_bridge/activity
 curl -i http://127.0.0.1:9000/_bridge/health
 curl -i "http://127.0.0.1:9000/_bridge/proxy/local/reports/?check=1"
 ```

@@ -2,6 +2,9 @@ package bridge
 
 import (
 	"context"
+	"filebridge/internal/config"
+	"filebridge/internal/protocol"
+	"filebridge/internal/storage"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,10 +13,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"filebridge/internal/config"
-	"filebridge/internal/protocol"
-	"filebridge/internal/storage"
 )
 
 func TestMultiServerRoutesAreIsolatedAndLegacyRouteIsUnambiguous(t *testing.T) {

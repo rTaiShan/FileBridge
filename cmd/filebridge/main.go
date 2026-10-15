@@ -37,7 +37,7 @@ func runServer(args []string) {
 	fs := flag.NewFlagSet("server", flag.ExitOnError)
 	share, configPath := fs.String("share", "", "shared FileBridge directory"), fs.String("config", "", "server services configuration")
 	serverID := fs.String("server-id", "", "stable unique server ID (required)")
-	poll := fs.Duration("poll", 500*time.Millisecond, "shared-folder polling interval")
+	poll := fs.Duration("poll", 5*time.Second, "shared-folder polling interval")
 	fs.Parse(args)
 	if *share == "" || *configPath == "" || *serverID == "" {
 		fs.Usage()
@@ -64,7 +64,7 @@ func runClient(args []string) {
 	fs := flag.NewFlagSet("client", flag.ExitOnError)
 	share, id := fs.String("share", "", "shared FileBridge directory"), fs.String("client-id", "", "stable client ID (generated if omitted)")
 	listen := fs.String("listen", "127.0.0.1:9000", "local HTTP listener")
-	timeout, poll := fs.Duration("timeout", 15*time.Second, "request timeout"), fs.Duration("poll", 500*time.Millisecond, "shared-folder polling interval")
+	timeout, poll := fs.Duration("timeout", 15*time.Second, "request timeout"), fs.Duration("poll", 5*time.Second, "shared-folder polling interval")
 	state := fs.String("state", defaultStatePath(), "client state directory")
 	trustedServers := fs.String("servers", "", "comma-separated trusted server IDs (empty discovers all)")
 	fs.Parse(args)
@@ -98,7 +98,7 @@ func runClient(args []string) {
 		}
 	}
 	client.Timeout, client.PollInterval = *timeout, *poll
-	client.HeartbeatMaxAge = 3 * *poll
+	client.HeartbeatMaxAge = 5 * *poll
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	go client.RunRefresher(ctx)

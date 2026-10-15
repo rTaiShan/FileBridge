@@ -22,6 +22,7 @@ func TestBridgeStatusAndHealthReflectHeartbeat(t *testing.T) {
 	}
 	server := protocol.ServerRegistry{Version: protocol.RegistryVersion, ServerID: "default", InstanceID: "instance-1", UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano), Services: map[string]protocol.RegistryService{"reports": {Description: "Reporting API"}}}
 	client.registry = protocol.Registry{Version: protocol.RegistryVersion, Servers: map[string]protocol.ServerRegistry{"default": server}}
+	client.lastRegistryAt = time.Now().UTC().Format(time.RFC3339Nano)
 
 	if err := storage.WriteJSONAtomic(filepath.Dir(storage.ServerHeartbeatPath(root, "default")), filepath.Base(storage.ServerHeartbeatPath(root, "default")), protocol.Heartbeat{ServerID: "default", InstanceID: "instance-1", UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano), Version: protocol.Version}); err != nil {
 		t.Fatalf("write heartbeat: %v", err)
@@ -43,6 +44,12 @@ func TestBridgeStatusAndHealthReflectHeartbeat(t *testing.T) {
 	if got := status["service_count"]; got != float64(1) {
 		t.Fatalf("status[service_count] = %v, want 1", got)
 	}
+	if _, ok := status["checked_at"].(string); !ok {
+		t.Fatalf("status[checked_at] = %#v, want timestamp", status["checked_at"])
+	}
+	if _, ok := status["registry_refreshed_at"].(string); !ok {
+		t.Fatalf("status[registry_refreshed_at] = %#v, want timestamp", status["registry_refreshed_at"])
+	}
 	servers, ok := status["servers"].([]any)
 	if !ok || len(servers) != 1 {
 		t.Fatalf("status[servers] = %#v, want one server", status["servers"])
@@ -56,6 +63,29 @@ func TestBridgeStatusAndHealthReflectHeartbeat(t *testing.T) {
 	client.handleBridge(healthRes, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:9000/_bridge/health", nil))
 	if healthRes.Code != http.StatusOK {
 		t.Fatalf("/_bridge/health code = %d, want %d", healthRes.Code, http.StatusOK)
+	}
+	var health map[string]any
+	if err := json.Unmarshal(healthRes.Body.Bytes(), &health); err != nil {
+		t.Fatalf("decode health response: %v", err)
+	}
+	if health["status"] != "ok" || health["live_server_count"] != float64(1) {
+		t.Fatalf("health = %#v, want healthy server counts", health)
+	}
+	if _, ok := health["checked_at"].(string); !ok {
+		t.Fatalf("health[checked_at] = %#v, want timestamp", health["checked_at"])
+	}
+
+	activityRes := httptest.NewRecorder()
+	client.handleBridge(activityRes, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:9000/_bridge/activity", nil))
+	if activityRes.Code != http.StatusOK {
+		t.Fatalf("/_bridge/activity code = %d, want %d", activityRes.Code, http.StatusOK)
+	}
+	var activity []map[string]any
+	if err := json.Unmarshal(activityRes.Body.Bytes(), &activity); err != nil {
+		t.Fatalf("decode activity response: %v", err)
+	}
+	if len(activity) != 0 {
+		t.Fatalf("activity = %#v, want empty before proxied requests", activity)
 	}
 
 	stale := protocol.Heartbeat{ServerID: "default", InstanceID: "instance-1", UpdatedAt: time.Now().Add(-10 * time.Second).UTC().Format(time.RFC3339Nano), Version: protocol.Version}
@@ -95,10 +125,39 @@ func TestDashboardIsServedByClientHandler(t *testing.T) {
 		t.Fatal("dashboard did not contain the expected client, service, server, and documentation views")
 	}
 
+	favicon := httptest.NewRecorder()
+	client.Handler().ServeHTTP(favicon, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:9000/_bridge/ui/favicon.svg", nil))
+	if favicon.Code != http.StatusOK {
+		t.Fatalf("favicon code = %d, want 200", favicon.Code)
+	}
+	if got := favicon.Header().Get("Content-Type"); got != "image/svg+xml" {
+		t.Fatalf("favicon Content-Type = %q", got)
+	}
+	if !strings.Contains(favicon.Body.String(), `fill="#1769d1"`) {
+		t.Fatal("favicon did not contain the expected FileBridge mark")
+	}
+
 	rootRedirect := httptest.NewRecorder()
 	client.Handler().ServeHTTP(rootRedirect, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:9000/", nil))
 	if rootRedirect.Code != http.StatusTemporaryRedirect || rootRedirect.Header().Get("Location") != "/_bridge/ui/" {
 		t.Fatalf("root redirect = %d %q, want temporary redirect to UI", rootRedirect.Code, rootRedirect.Header().Get("Location"))
+	}
+}
+
+func TestActivityRecorderKeepsRecentEntries(t *testing.T) {
+	client, err := NewClient(t.TempDir(), "activity-client")
+	if err != nil {
+		t.Fatalf("NewClient() error: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		client.recordActivity(requestActivity{ID: string(rune('a' + i)), StartedAt: time.Now().UTC().Format(time.RFC3339Nano), Outcome: "completed"})
+	}
+	activity := client.activitySnapshot()
+	if len(activity) != 3 {
+		t.Fatalf("activity length = %d, want 3: %#v", len(activity), activity)
+	}
+	if activity[0].ID != "c" {
+		t.Fatalf("latest activity ID = %q, want c", activity[0].ID)
 	}
 }
 

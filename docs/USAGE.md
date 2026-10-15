@@ -111,13 +111,14 @@ Use a stable, unique `--client-id` per installation. If it is omitted,
 FileBridge generates and persists one in the operating system configuration
 directory. Explicit IDs make share permissions and troubleshooting clearer.
 
-Both roles poll every 500 ms by default. Use `--poll 1s` if lower share traffic
-is more important than latency. The client returns a timeout error after 15
-seconds by default; change it with `--timeout` when an upstream operation is
-expected to take longer. Shared-folder publication failures are retried by the
-server, including transient Windows/SMB rename failures. If a client times out,
-it marks the request as cancelled so the server will not start forwarding it;
-old request and response files are reclaimed by the client's refresher.
+Both roles poll every 5 seconds by default. Use `--poll 1s` when lower share
+latency is more important than reduced share traffic. The client returns a
+timeout error after 15 seconds by default; change it with `--timeout` when an
+upstream operation is expected to take longer. Shared-folder publication
+failures are retried by the server, including transient Windows/SMB rename
+failures. If a client times out, it marks the request as cancelled so the
+server will not start forwarding it; old request and response files are
+reclaimed by the client's refresher.
 
 ## Call services through the client
 
@@ -153,6 +154,7 @@ These endpoints belong to FileBridge and do not reach registered services:
 ```bash
 curl -i http://127.0.0.1:9000/_bridge/status
 curl -i http://127.0.0.1:9000/_bridge/services
+curl -i http://127.0.0.1:9000/_bridge/activity
 curl -i http://127.0.0.1:9000/_bridge/version
 curl -i http://127.0.0.1:9000/_bridge/health
 ```
@@ -163,10 +165,14 @@ connection health, discovered servers, and the services each server exposes.
 The dashboard only displays explicitly-published service information; it does
 not expose server-local target URLs or change client settings.
 
-`/_bridge/status` includes the client ID and whether the server heartbeat is
-fresh. `/_bridge/services` shows the sanitized service registry; it never
-reveals target URLs. `/_bridge/health` returns 200 only while the server
-heartbeat is current.
+`/_bridge/status` includes the client ID, whether the server heartbeat is fresh,
+the time the status was checked, and the last successful registry refresh.
+`/_bridge/services` shows the sanitized service registry; it never reveals
+target URLs. `/_bridge/activity` returns up to 50 recent proxied
+request/response metadata records, including method, route, selected server and
+service, status, duration, and byte counts. It does not retain headers or
+bodies. `/_bridge/health` returns 200 only while the server heartbeat is
+current and includes the check time and live-server counts.
 
 ## Error behavior
 

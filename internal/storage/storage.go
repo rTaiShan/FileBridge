@@ -80,13 +80,19 @@ func WriteBodyAtomic(dir, name string, r io.Reader) (int64, error) {
 	destination := filepath.Join(dir, name)
 	var renameErr error
 	for range 10 {
-		if renameErr = os.Rename(tmpName, destination); renameErr == nil {
+		if renameErr = replaceFile(tmpName, destination); renameErr == nil {
 			return n, nil
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
 	_ = os.Remove(tmpName)
 	return n, renameErr
+}
+
+func replaceFile(source, destination string) error {
+	// os.Rename uses the platform replacement primitive. On Windows this
+	// preserves the destination while retrying transient sharing violations.
+	return os.Rename(source, destination)
 }
 
 func writeAtomic(dir, name string, r io.Reader) error {
@@ -111,7 +117,7 @@ func NewID() (string, error) {
 }
 
 func SafeName(s string) bool {
-	if s == "" || len(s) > 100 {
+	if s == "" || s == "." || s == ".." || len(s) > 100 {
 		return false
 	}
 	for _, r := range s {

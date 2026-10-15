@@ -22,6 +22,7 @@ import (
 )
 
 const explicitProxyPrefix = "/_bridge/proxy/"
+const activityLimit = 50
 
 type Client struct {
 	Root            string
@@ -33,6 +34,23 @@ type Client struct {
 	mu             sync.RWMutex
 	registry       protocol.Registry
 	allowedServers map[string]struct{}
+	lastRegistryAt string
+	activityMu     sync.RWMutex
+	activity       []requestActivity
+}
+
+type requestActivity struct {
+	ID            string `json:"id"`
+	StartedAt     string `json:"started_at"`
+	Method        string `json:"method"`
+	Path          string `json:"path"`
+	ServerID      string `json:"server_id"`
+	Service       string `json:"service"`
+	Status        int    `json:"status,omitempty"`
+	DurationMS    int64  `json:"duration_ms"`
+	RequestBytes  int64  `json:"request_bytes"`
+	ResponseBytes int64  `json:"response_bytes"`
+	Outcome       string `json:"outcome"`
 }
 
 func NewClient(root, id string) (*Client, error) {
@@ -40,7 +58,7 @@ func NewClient(root, id string) (*Client, error) {
 		return nil, fmt.Errorf("invalid client ID")
 	}
 	return &Client{
-		Root: root, ID: id, Timeout: 15 * time.Second, PollInterval: 500 * time.Millisecond, HeartbeatMaxAge: 3 * time.Second,
+		Root: root, ID: id, Timeout: 15 * time.Second, PollInterval: 5 * time.Second, HeartbeatMaxAge: 25 * time.Second,
 		registry: protocol.Registry{Version: protocol.RegistryVersion, Servers: map[string]protocol.ServerRegistry{}},
 	}, nil
 }
@@ -76,7 +94,7 @@ func hasServer(servers map[string]struct{}, id string) bool {
 // RunRefresher keeps registry data fresh even when no request is in progress.
 func (c *Client) RunRefresher(ctx context.Context) {
 	if c.PollInterval <= 0 {
-		c.PollInterval = 500 * time.Millisecond
+		c.PollInterval = 5 * time.Second
 	}
 	_ = c.RefreshRegistry()
 	c.cleanupStale()
@@ -130,6 +148,7 @@ func (c *Client) RefreshRegistry() error {
 	}
 	c.mu.Lock()
 	c.registry = protocol.Registry{Version: protocol.RegistryVersion, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano), Servers: servers}
+	c.lastRegistryAt = c.registry.UpdatedAt
 	c.mu.Unlock()
 	return nil
 }
@@ -192,19 +211,53 @@ func (c *Client) handleBridge(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"version": protocol.Version})
 	case "/_bridge/services":
 		writeJSON(w, http.StatusOK, registry)
+	case "/_bridge/activity":
+		writeJSON(w, http.StatusOK, c.activitySnapshot())
 	case "/_bridge/status":
 		live, services := c.registryHealth(registry)
-		writeJSON(w, http.StatusOK, map[string]any{"client_id": c.ID, "version": protocol.Version, "server_alive": live > 0, "server_count": len(registry.Servers), "live_server_count": live, "service_count": services, "servers": c.serverStatuses(registry)})
+		writeJSON(w, http.StatusOK, map[string]any{"client_id": c.ID, "version": protocol.Version, "checked_at": time.Now().UTC().Format(time.RFC3339Nano), "registry_refreshed_at": c.lastRegistryTimestamp(), "server_alive": live > 0, "server_count": len(registry.Servers), "live_server_count": live, "service_count": services, "servers": c.serverStatuses(registry)})
 	case "/_bridge/health":
 		live, _ := c.registryHealth(registry)
 		if live == 0 {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "no server heartbeat is fresh"})
+			writeJSON(w, http.StatusBadGateway, map[string]any{"status": "degraded", "checked_at": time.Now().UTC().Format(time.RFC3339Nano), "server_count": len(registry.Servers), "live_server_count": live, "error": "no server heartbeat is fresh"})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "checked_at": time.Now().UTC().Format(time.RFC3339Nano), "server_count": len(registry.Servers), "live_server_count": live})
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (c *Client) lastRegistryTimestamp() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.lastRegistryAt
+}
+
+func (c *Client) activitySnapshot() []requestActivity {
+	c.activityMu.RLock()
+	defer c.activityMu.RUnlock()
+	activity := make([]requestActivity, len(c.activity))
+	copy(activity, c.activity)
+	return activity
+}
+
+func (c *Client) recordActivity(activity requestActivity) {
+	c.activityMu.Lock()
+	defer c.activityMu.Unlock()
+	activity.DurationMS = time.Since(parseActivityTime(activity.StartedAt)).Milliseconds()
+	c.activity = append([]requestActivity{activity}, c.activity...)
+	if len(c.activity) > activityLimit {
+		c.activity = c.activity[:activityLimit]
+	}
+}
+
+func parseActivityTime(value string) time.Time {
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return time.Now()
+	}
+	return parsed
 }
 
 // serverStatus is a read-only dashboard summary. It never exposes upstream
@@ -295,6 +348,13 @@ func (c *Client) proxy(w http.ResponseWriter, r *http.Request, serverID, service
 		http.Error(w, "could not publish request", http.StatusBadGateway)
 		return
 	}
+	activity := requestActivity{ID: id, StartedAt: req.CreatedAt, Method: r.Method, Path: remotePath, ServerID: server.ServerID, Service: service, RequestBytes: n, Outcome: "pending"}
+	defer func() {
+		if activity.Outcome == "pending" {
+			activity.Outcome = "failed"
+		}
+		c.recordActivity(activity)
+	}()
 
 	resp, body, err := c.waitForServerResponse(r.Context(), server.ServerID, server.InstanceID, id, deadline)
 	if err != nil {
@@ -302,12 +362,17 @@ func (c *Client) proxy(w http.ResponseWriter, r *http.Request, serverID, service
 			log.Printf("FileBridge: mark request %s/%s cancelled: %v", server.ServerID, id, err)
 		}
 		if errors.Is(err, context.DeadlineExceeded) {
+			activity.Status = http.StatusGatewayTimeout
 			http.Error(w, "bridge request timed out", http.StatusGatewayTimeout)
 		} else {
+			activity.Status = http.StatusBadGateway
 			http.Error(w, "bridge response unavailable", http.StatusBadGateway)
 		}
 		return
 	}
+	activity.Status = resp.Status
+	activity.ResponseBytes = resp.Body.Size
+	activity.Outcome = "completed"
 	c.copyResponse(w, resp, body)
 	if err := body.Close(); err != nil {
 		c.cleanup(server.ServerID, id)
@@ -350,7 +415,7 @@ func hasService(server protocol.ServerRegistry, service string) bool {
 func (c *Client) waitForServerResponse(requestContext context.Context, serverID, instanceID, id string, deadline time.Time) (protocol.Response, io.ReadCloser, error) {
 	poll := c.PollInterval
 	if poll <= 0 {
-		poll = 500 * time.Millisecond
+		poll = 5 * time.Second
 	}
 	t := time.NewTicker(poll)
 	defer t.Stop()
@@ -522,7 +587,7 @@ func (c *Client) serverAlive(target ...string) bool {
 	}
 	maxAge := c.HeartbeatMaxAge
 	if maxAge <= 0 {
-		maxAge = 3 * c.PollInterval
+		maxAge = 5 * c.PollInterval
 	}
 	return time.Since(updated) <= maxAge
 }

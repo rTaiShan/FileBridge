@@ -12,6 +12,9 @@ import (
 //go:embed dashboard.html
 var dashboard []byte
 
+//go:embed favicon.svg
+var favicon []byte
+
 // Handler serves the dashboard from /_bridge/ui/.
 func Handler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -19,7 +22,17 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if r.URL.Path != "/_bridge/ui/" {
+	switch r.URL.Path {
+	case "/_bridge/ui/favicon.svg":
+		w.Header().Set("Content-Type", "image/svg+xml")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		if r.Method == http.MethodHead {
+			return
+		}
+		_, _ = w.Write(favicon)
+		return
+	case "/_bridge/ui/":
+	default:
 		http.NotFound(w, r)
 		return
 	}

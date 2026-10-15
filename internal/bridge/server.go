@@ -50,12 +50,12 @@ func NewServerWithID(root, id string, cfg config.Server) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Server{Root: root, ID: id, InstanceID: instanceID, Config: cfg, PollInterval: 500 * time.Millisecond, HTTPClient: &http.Client{Timeout: 30 * time.Second}, inFlight: map[string]struct{}{}, lastLog: map[string]time.Time{}}, nil
+	return &Server{Root: root, ID: id, InstanceID: instanceID, Config: cfg, PollInterval: 5 * time.Second, HTTPClient: &http.Client{Timeout: 30 * time.Second}, inFlight: map[string]struct{}{}, lastLog: map[string]time.Time{}}, nil
 }
 
 func (s *Server) Run(ctx context.Context) error {
 	if s.PollInterval <= 0 {
-		s.PollInterval = 500 * time.Millisecond
+		s.PollInterval = 5 * time.Second
 	}
 	registryPublished := false
 	ticker := time.NewTicker(s.PollInterval)
